@@ -25,7 +25,14 @@ SECRET_KEY = "django-insecure-wqvcb&&x1troo-s4gerymd%a8z##4pl_m_z-a%@d&o5#!!ygbe
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+
+ALLOWED_HOSTS = [
+    "sodepci-backend.onrender.com",
+    "localhost",
+    "127.0.0.1",
+]
+CSRF_TRUSTED_ORIGINS = ['https://sodepci-backend.onrender.com']
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Application definition
@@ -51,6 +58,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -64,6 +72,7 @@ MIDDLEWARE = [
 # --- CORS Configuration ---
 CORS_ALLOW_ALL_ORIGINS = True  # À restreindre en production si possible
 CORS_ALLOWED_ORIGINS = [
+    "https://sodepci-backend.onrender.com",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
@@ -136,19 +145,29 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
-LANGUAGE_CODE = "en-us"
+STATIC_URL = '/static/'
 
-TIME_ZONE = "UTC"
+# --- Correction du problème du dossier static manquant ---
+# Crée le dossier 'static' à la racine s'il n'existe pas
+STATICFILES_DIRS = []
+static_dir = BASE_DIR / 'static'
+if not static_dir.exists():
+    static_dir.mkdir(parents=True, exist_ok=True)
+STATICFILES_DIRS.append(static_dir)
 
-USE_I18N = True
+# Dossier de destination pour la commande collectstatic
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-USE_TZ = True
+# Configuration de WhiteNoise pour servir les fichiers statiques en production
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
+# --- Media files ---
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.2/howto/static-files/
-
-STATIC_URL = "static/"
+# --- Options supplémentaires ---
+IMAGE_MAX_SIZE = (800, 800)
+THUMBNAIL_SIZE = (150, 150)
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
