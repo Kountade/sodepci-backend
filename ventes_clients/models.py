@@ -302,21 +302,7 @@ class Client(models.Model):
 # ============================================================
 # DEVIS
 # ============================================================
-# apps/ventes_clients/models.py - DEVIS SEULEMENT
 
-from django.db import models
-from django.utils import timezone
-from datetime import date, timedelta
-from decimal import Decimal
-import qrcode
-from io import BytesIO
-from django.core.files import File
-
-from users.models import CustomUser
-from produits_stocks.models import Product, Lot, Warehouse, Stock, StockMovement
-
-
-# ==================== DEVIS ====================
 class Devis(models.Model):
     """
     Devis / Proforma
@@ -334,10 +320,10 @@ class Devis(models.Model):
         max_length=50, unique=True, verbose_name="N° Devis"
     )
     client = models.ForeignKey(
-        'Client', 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True, 
+        'Client',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='devis'
     )
     client_name = models.CharField(
@@ -373,12 +359,12 @@ class Devis(models.Model):
         max_digits=12, decimal_places=2, default=0, verbose_name="Sous-total"
     )
     discount_type = models.CharField(
-        max_length=20, 
+        max_length=20,
         choices=[
             ('percentage', 'Pourcentage'),
             ('amount', 'Montant')
-        ], 
-        default='percentage', 
+        ],
+        default='percentage',
         verbose_name="Type remise"
     )
     discount_value = models.DecimalField(
@@ -401,26 +387,27 @@ class Devis(models.Model):
     )
 
     status = models.CharField(
-        max_length=20, 
-        choices=STATUS_CHOICES, 
-        default='draft', 
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='draft',
         verbose_name="Statut"
     )
     notes = models.TextField(blank=True, verbose_name="Notes")
-    internal_notes = models.TextField(blank=True, verbose_name="Notes internes")
+    internal_notes = models.TextField(
+        blank=True, verbose_name="Notes internes")
 
     sale = models.ForeignKey(
-        'Vente', 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True, 
+        'Vente',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='devis_source'
     )
 
     qr_code = models.ImageField(
-        upload_to='qrcodes/devis/', 
-        null=True, 
-        blank=True, 
+        upload_to='qrcodes/devis/',
+        null=True,
+        blank=True,
         verbose_name="QR Code"
     )
     qr_code_data = models.TextField(
@@ -434,11 +421,11 @@ class Devis(models.Model):
         auto_now=True, verbose_name="Date modification"
     )
     created_by = models.ForeignKey(
-        CustomUser, 
+        CustomUser,
         on_delete=models.SET_NULL,
-        null=True, 
-        blank=True, 
-        related_name='devis', 
+        null=True,
+        blank=True,
+        related_name='devis',
         verbose_name="Créé par"
     )
 
@@ -464,8 +451,7 @@ class Devis(models.Model):
         after_discount = self.subtotal - self.discount_amount
         self.tax_amount = after_discount * (self.tax_rate / 100)
         self.total = after_discount + self.tax_amount + self.shipping_fee
-        
-        # Sauvegarder sans déclencher de boucle
+
         super().save(update_fields=[
             'subtotal', 'discount_amount', 'tax_amount', 'total'
         ])
@@ -514,25 +500,21 @@ class Devis(models.Model):
         """
         Sauvegarde avec génération automatique du QR Code
         """
-        # Sauvegarder d'abord si c'est une nouvelle instance
         if not self.pk:
             super().save(*args, **kwargs)
-        
-        # Générer le QR Code si nécessaire
+
         if not self.qr_code or not self.qr_code_data:
             self.generate_qr_code()
             super().save(update_fields=['qr_code', 'qr_code_data'])
         else:
             super().save(*args, **kwargs)
 
-    # ✅ METHODE CONVERT_TO_SALE CORRIGÉE
     def convert_to_sale(self, user=None):
         """
         Convertit le devis en vente
         """
         from .models import Vente, LigneVente
 
-        # Vérifications préalables
         if not self.warehouse:
             raise ValueError(
                 "L'entrepôt doit être défini pour convertir le devis en vente"
@@ -548,7 +530,6 @@ class Devis(models.Model):
                 "Ce devis a déjà été converti en vente"
             )
 
-        # Générer le numéro de facture
         last_vente = Vente.objects.order_by('-id').first()
         if last_vente and last_vente.invoice_number:
             try:
@@ -559,7 +540,6 @@ class Devis(models.Model):
             num = 1
         invoice_number = f"INV-{date.today().year}-{num:04d}"
 
-        # ✅ ÉTAPE 1: Créer la vente en brouillon
         vente = Vente(
             invoice_number=invoice_number,
             client=self.client,
@@ -579,12 +559,11 @@ class Devis(models.Model):
             total=self.total,
             notes=self.notes,
             internal_notes=self.internal_notes,
-            status='draft',  # ✅ Statut brouillon - PAS de déduction de stock
+            status='draft',
             created_by=user
         )
         vente.save()
 
-        # ✅ ÉTAPE 2: Créer les lignes de vente à partir du devis
         for ligne_devis in self.lignes.all():
             LigneVente.objects.create(
                 sale=vente,
@@ -597,23 +576,19 @@ class Devis(models.Model):
                 notes=ligne_devis.notes
             )
 
-        # ✅ ÉTAPE 3: Mettre à jour le statut du devis
         self.status = 'converted'
         self.sale = vente
         self.save(update_fields=['status', 'sale'])
 
-        # ✅ ÉTAPE 4: Recalculer les totaux de la vente
         vente.calculate_totals()
-        
-        # ✅ ÉTAPE 5: Générer le QR Code de la vente
         vente.generate_qr_code()
         vente.save(update_fields=['qr_code', 'qr_code_data'])
 
         return vente
 
 
-# ==================== LIGNE DEVIS ====================
-
+# ============================================================
+# LIGNE DEVIS
 # ============================================================
 
 class LigneDevis(models.Model):
@@ -1007,177 +982,236 @@ class Vente(models.Model):
             save=False
         )
 
+    # ================================================================
+    # MÉTHODE DEDUCT_STOCK CORRIGÉE
+    # ================================================================
+
     @transaction.atomic
     def deduct_stock(self):
-
+        """
+        Déduit le stock en consommant les lots FIFO
+        La méthode est atomique : tout ou rien
+        """
         if not self.warehouse:
+            raise ValidationError("L'entrepôt de vente est obligatoire.")
 
-            raise ValidationError(
-                "L'entrepôt de vente est obligatoire."
-            )
-
-        lines = list(
-            self.lines
-            .select_related("product")
-            .all()
-        )
+        # Récupérer toutes les lignes de vente
+        lines = list(self.lines.select_related("product").all())
 
         if not lines:
-
             raise ValidationError(
-                "La vente doit contenir au moins un produit."
-            )
+                "La vente doit contenir au moins un produit.")
 
-        # Vérification globale AVANT de modifier le stock
+        # ============================================================
+        # ÉTAPE 1 : VÉRIFICATION GLOBALE AVANT DE MODIFIER LE STOCK
+        # ============================================================
         for line in lines:
-
-            stock = (
-                Stock.objects
-                .select_for_update()
-                .filter(
-                    product=line.product,
-                    warehouse=self.warehouse
-                )
-                .first()
-            )
+            # Vérifier que le produit existe dans le stock
+            stock = Stock.objects.select_for_update().filter(
+                product=line.product,
+                warehouse=self.warehouse
+            ).first()
 
             if not stock:
-
                 raise ValidationError(
-                    f"Aucun stock trouvé pour "
-                    f"{line.product.name}."
+                    f"Aucun stock trouvé pour {line.product.name}."
                 )
 
+            # Vérifier la disponibilité
             if stock.available_quantity < line.quantity:
-
                 raise ValidationError(
-                    f"Stock insuffisant pour "
-                    f"{line.product.name}. "
-                    f"Disponible : "
-                    f"{stock.available_quantity}, "
+                    f"Stock insuffisant pour {line.product.name}. "
+                    f"Disponible : {stock.available_quantity}, "
                     f"Demandé : {line.quantity}."
                 )
 
-        # Déduction FIFO
+        # ============================================================
+        # ÉTAPE 2 : CONSOMMATION FIFO DES LOTS
+        # ============================================================
         for line in lines:
-
-            stock = (
-                Stock.objects
-                .select_for_update()
-                .get(
-                    product=line.product,
-                    warehouse=self.warehouse
-                )
+            # Récupérer le stock du produit
+            stock = Stock.objects.select_for_update().get(
+                product=line.product,
+                warehouse=self.warehouse
             )
 
-            lots = (
-                Lot.objects
-                .select_for_update()
-                .filter(
-                    product=line.product,
-                    warehouse=self.warehouse,
-                    current_quantity__gt=0,
-                    is_blocked=False
-                )
-                .exclude(
-                    status="expired"
-                )
-                .order_by(
-                    "expiry_date",
-                    "id"
-                )
-            )
+            # Récupérer les lots disponibles (FIFO = par date d'expiration)
+            lots = Lot.objects.select_for_update().filter(
+                product=line.product,
+                warehouse=self.warehouse,
+                current_quantity__gt=0,
+                is_blocked=False
+            ).exclude(status="expired").order_by("expiry_date", "id")
 
             remaining = line.quantity
 
             for lot in lots:
-
                 if remaining <= 0:
                     break
 
-                quantity = min(
-                    lot.available_quantity,
-                    remaining
-                )
+                # Quantité à prélever sur ce lot
+                quantity = min(lot.available_quantity, remaining)
 
                 if quantity <= 0:
                     continue
 
-                # IMPORTANT :
-                # Ne pas modifier directement lot.current_quantity.
-                # StockMovement.save() le fait une seule fois.
+                # ============================================================
+                # ÉTAPE 2.1 : CONSOMMER LE LOT (MODIFICATION DIRECTE)
+                # ============================================================
+
+                # Mettre à jour la quantité du lot
+                lot.current_quantity -= quantity
+                lot.reserved_quantity = max(
+                    0, lot.reserved_quantity - quantity)
+                lot.last_used_date = date.today()
+
+                # Mettre à jour le statut du lot si nécessaire
+                if lot.expiry_date:
+                    today = date.today()
+                    alert_days = lot.product.alert_days if lot.product else 30
+
+                    if lot.expiry_date < today:
+                        lot.status = 'expired'
+                    elif lot.expiry_date <= today + timedelta(days=alert_days):
+                        lot.status = 'expiring'
+                    else:
+                        lot.status = 'good'
+
+                # Sauvegarder le lot modifié
+                lot.save(update_fields=[
+                    'current_quantity',
+                    'reserved_quantity',
+                    'last_used_date',
+                    'status'
+                ])
+
+                # ============================================================
+                # ÉTAPE 2.2 : CRÉER LE MOUVEMENT DE STOCK
+                # ============================================================
+
                 StockMovement.objects.create(
                     product=line.product,
                     lot=lot,
                     from_warehouse=self.warehouse,
+                    to_warehouse=None,
                     movement_type="sale_out",
                     quantity=quantity,
+                    previous_quantity=lot.current_quantity + quantity,
+                    new_quantity=lot.current_quantity,
                     reference_type="sale",
                     reference_id=self.id,
                     reference_number=self.invoice_number,
                     reason=f"Vente {self.invoice_number}",
+                    notes=f"Ligne {line.id} - {line.quantity} unités",
                     created_by=self.created_by
                 )
 
                 remaining -= quantity
 
+            # Vérifier que tout a été consommé
             if remaining > 0:
-
                 raise ValidationError(
-                    f"Stock insuffisant pour "
-                    f"{line.product.name}."
+                    f"Stock insuffisant pour {line.product.name}. "
+                    f"Reste à fournir : {remaining} unités."
                 )
 
-            stock.update_quantity()
+        # ============================================================
+        # ÉTAPE 3 : MISE À JOUR DU STOCK GLOBAL
+        # ============================================================
+        for line in lines:
+            stock = Stock.objects.filter(
+                product=line.product,
+                warehouse=self.warehouse
+            ).first()
+
+            if stock:
+                # Recalculer la quantité totale à partir des lots
+                stock.update_quantity()
+
+                # Mettre à jour la quantité réservée
+                total_reserved = Lot.objects.filter(
+                    product=line.product,
+                    warehouse=self.warehouse,
+                    is_blocked=False
+                ).exclude(status='expired').aggregate(
+                    total=models.Sum('reserved_quantity')
+                )['total'] or 0
+
+                stock.reserved_quantity = total_reserved
+                stock.save(update_fields=['reserved_quantity', 'last_update'])
+
+        # ============================================================
+        # ÉTAPE 4 : METTRE À JOUR LE STATUT DU PRODUIT
+        # ============================================================
+        for line in lines:
+            line.product.update_status()
+
+    # ================================================================
+    # MÉTHODE RESTORE_STOCK CORRIGÉE
+    # ================================================================
 
     @transaction.atomic
     def restore_stock(self):
-
+        """
+        Restaure le stock lors de l'annulation d'une vente
+        """
         if not self.warehouse:
             return
 
-        movements = (
-            StockMovement.objects
-            .filter(
-                reference_type="sale",
-                reference_id=self.id,
-                movement_type="sale_out"
-            )
-            .select_related("product", "lot")
-        )
+        # Récupérer tous les mouvements de sortie de cette vente
+        movements = StockMovement.objects.filter(
+            reference_type="sale",
+            reference_id=self.id,
+            movement_type="sale_out"
+        ).select_related("product", "lot")
+
+        if not movements.exists():
+            return
 
         for movement in movements:
-
             if not movement.lot:
                 continue
 
-            # IMPORTANT :
-            # Ne pas modifier directement le lot.
-            # Le mouvement return_in augmente le lot une seule fois.
+            # RESTAURER LE LOT
+            lot = movement.lot
+
+            # Augmenter la quantité du lot
+            lot.current_quantity += movement.quantity
+
+            # Mettre à jour le statut du lot
+            if lot.expiry_date:
+                today = date.today()
+                if lot.expiry_date < today:
+                    lot.status = 'expired'
+                elif lot.expiry_date <= today + timedelta(days=lot.product.alert_days):
+                    lot.status = 'expiring'
+                else:
+                    lot.status = 'good'
+
+            lot.save(update_fields=['current_quantity', 'status'])
+
+            # CRÉER LE MOUVEMENT DE RETOUR
             StockMovement.objects.create(
                 product=movement.product,
-                lot=movement.lot,
+                lot=lot,
+                from_warehouse=None,
                 to_warehouse=self.warehouse,
                 movement_type="return_in",
                 quantity=movement.quantity,
+                previous_quantity=lot.current_quantity - movement.quantity,
+                new_quantity=lot.current_quantity,
                 reference_type="sale_cancel",
                 reference_id=self.id,
                 reference_number=self.invoice_number,
                 reason=f"Annulation vente {self.invoice_number}",
+                notes=f"Restauration du mouvement {movement.id}",
                 created_by=self.created_by
             )
 
-        product_ids = (
-            movements
-            .values_list(
-                "product_id",
-                flat=True
-            )
-            .distinct()
-        )
+        # METTRE À JOUR LE STOCK
+        product_ids = movements.values_list("product_id", flat=True).distinct()
 
         for product_id in product_ids:
-
             stock = Stock.objects.filter(
                 product_id=product_id,
                 warehouse=self.warehouse
@@ -1185,6 +1219,74 @@ class Vente(models.Model):
 
             if stock:
                 stock.update_quantity()
+
+                total_reserved = Lot.objects.filter(
+                    product_id=product_id,
+                    warehouse=self.warehouse,
+                    is_blocked=False
+                ).exclude(status='expired').aggregate(
+                    total=models.Sum('reserved_quantity')
+                )['total'] or 0
+
+                stock.reserved_quantity = total_reserved
+                stock.save(update_fields=['reserved_quantity', 'last_update'])
+
+        # METTRE À JOUR LE STATUT DES PRODUITS
+        for product_id in product_ids:
+            product = Product.objects.filter(id=product_id).first()
+            if product:
+                product.update_status()
+
+    # ================================================================
+    # MÉTHODE DE DÉBOGAGE
+    # ================================================================
+
+    def get_stock_details(self):
+        """
+        Méthode de débogage pour afficher les détails du stock
+        """
+        if not self.warehouse:
+            return {"error": "Aucun entrepôt associé"}
+
+        details = []
+        for line in self.lines.select_related("product").all():
+            stock = Stock.objects.filter(
+                product=line.product,
+                warehouse=self.warehouse
+            ).first()
+
+            lots = Lot.objects.filter(
+                product=line.product,
+                warehouse=self.warehouse,
+                current_quantity__gt=0,
+                is_blocked=False
+            ).exclude(status="expired").order_by("expiry_date")
+
+            lots_details = [
+                {
+                    "lot_number": lot.lot_number,
+                    "current_quantity": lot.current_quantity,
+                    "available_quantity": lot.available_quantity,
+                    "expiry_date": lot.expiry_date,
+                    "status": lot.status
+                }
+                for lot in lots
+            ]
+
+            details.append({
+                "product": line.product.name,
+                "product_code": line.product.code,
+                "quantity_sold": line.quantity,
+                "stock_quantity": stock.quantity if stock else 0,
+                "stock_available": stock.available_quantity if stock else 0,
+                "lots": lots_details
+            })
+
+        return details
+
+    # ================================================================
+    # AUTRES MÉTHODES EXISTANTES
+    # ================================================================
 
     def get_or_create_anonymous_client(self):
 
@@ -1262,13 +1364,19 @@ class Vente(models.Model):
 
         return facture
 
-    def save(self, *args, **kwargs):
+    # ================================================================
+    # MÉTHODE SAVE CORRIGÉE
+    # ================================================================
 
+    def save(self, *args, **kwargs):
+        """
+        Sauvegarde avec gestion du statut et des opérations associées
+        """
         is_new = self.pk is None
         old_status = None
 
+        # Récupérer l'ancien statut si mise à jour
         if self.pk:
-
             old_status = (
                 Vente.objects
                 .filter(pk=self.pk)
@@ -1276,81 +1384,84 @@ class Vente(models.Model):
                 .first()
             )
 
+        # Définir le nom du client si absent
         if not self.client_name:
-
             self.client_name = (
                 self.client.name
                 if self.client
                 else "Client anonyme"
             )
 
+        # Générer le numéro de facture si nouveau
         if not self.invoice_number:
-
             self.invoice_number = generate_number(
                 Vente,
                 "invoice_number",
                 "INV"
             )
 
+        # Déterminer si c'est une confirmation
         is_confirming = (
             not is_new
             and old_status == "draft"
             and self.status == "confirmed"
         )
 
+        # Déterminer si c'est une annulation
         is_cancelling = (
             not is_new
-            and old_status in [
-                "confirmed",
-                "paid",
-                "delivered"
-            ]
+            and old_status in ["confirmed", "paid", "delivered"]
             and self.status == "cancelled"
         )
 
-        # Sauvegarde normale
+        # ============================================================
+        # SAUVEGARDE INITIALE
+        # ============================================================
+
+        # Appeler save() parent pour enregistrer les modifications
         super().save(*args, **kwargs)
 
-        # QR après création
+        # ============================================================
+        # GÉNÉRATION DU QR CODE (après création)
+        # ============================================================
+
         if not self.qr_code or not self.qr_code_data:
-
             self.generate_qr_code()
+            super().save(update_fields=[
+                "qr_code", "qr_code_data", "updated_at"])
 
-            super().save(
-                update_fields=[
-                    "qr_code",
-                    "qr_code_data",
-                    "updated_at"
-                ]
-            )
+        # ============================================================
+        # CONFIRMATION : DÉDUCTION DU STOCK
+        # ============================================================
 
-        # Confirmation
         if is_confirming:
-
             try:
-
+                # Appel à deduct_stock() dans une transaction
                 self.deduct_stock()
-                self.generate_invoice()
+
+                # Générer la facture
+                if not self.invoices.exists():
+                    self.generate_invoice()
 
             except Exception as error:
-
+                # En cas d'erreur, on revient en brouillon
                 self.status = "draft"
-
-                super().save(
-                    update_fields=[
-                        "status",
-                        "updated_at"
-                    ]
-                )
-
+                super().save(update_fields=["status", "updated_at"])
                 raise ValidationError(
-                    f"Erreur lors de la confirmation : {error}"
-                )
+                    f"Erreur lors de la confirmation : {error}")
 
-        # Annulation
+        # ============================================================
+        # ANNULATION : RESTAURATION DU STOCK
+        # ============================================================
+
         if is_cancelling:
-
-            self.restore_stock()
+            try:
+                self.restore_stock()
+            except Exception as error:
+                # En cas d'erreur, on ne laisse pas la vente annulée
+                self.status = old_status
+                super().save(update_fields=["status", "updated_at"])
+                raise ValidationError(f"Erreur lors de l'annulation : {error}")
 
 
 # ============================================================
@@ -1630,9 +1741,6 @@ class Facture(models.Model):
 # ============================================================
 # PAIEMENT
 # ============================================================
-# ============================================================
-# PAIEMENT
-# ============================================================
 
 class Paiement(models.Model):
 
@@ -1691,7 +1799,6 @@ class Paiement(models.Model):
         blank=True
     )
 
-    # ✅ CHAMP AJOUTÉ pour corriger l'erreur "updated_at" inexistant
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -1758,14 +1865,10 @@ class Paiement(models.Model):
 
         is_new = self.pk is None
 
-        # Sauvegarde initiale
         super().save(*args, **kwargs)
 
-        # Si c'est un nouveau paiement, on génère le QR code
         if is_new:
             self.generate_qr_code()
-
-            # ✅ Maintenant que `updated_at` existe, on peut le mettre à jour
             super().save(
                 update_fields=[
                     "qr_code",
@@ -1774,10 +1877,8 @@ class Paiement(models.Model):
                 ]
             )
 
-        # Mise à jour du statut de paiement de la facture
         self.facture.update_payment_status()
 
-        # Mise à jour des montants sur la vente associée
         sale = self.facture.sale
 
         if sale:
@@ -1810,13 +1911,14 @@ class Paiement(models.Model):
                     "amount_paid",
                     "amount_due",
                     "payment_status",
-                    "updated_at"      # Vente possède bien ce champ
+                    "updated_at"
                 ]
             )
+
+
 # ============================================================
 # AVOIR
 # ============================================================
-
 
 class Avoir(models.Model):
 

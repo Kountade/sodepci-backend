@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     "produits_stocks",
     "rest_framework",
     "ventes_clients",
+    "dashboard",
     "knox",
     "corsheaders",
     "django_rest_passwordreset",
