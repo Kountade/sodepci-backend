@@ -1,12 +1,11 @@
-# dashboard/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import DashboardViewSet, StatistiquesViewSet, AnalysesViewSet   # ✅ noms avec 's'
+from .views import DashboardViewSet, StatistiqueViewSet, AnalyseViewSet
 
 router = DefaultRouter()
 router.register('dashboard', DashboardViewSet, basename='dashboard')
-router.register('statistiques', StatistiquesViewSet, basename='statistiques')
-router.register('analyses', AnalysesViewSet, basename='analyses')
+router.register('statistique', StatistiqueViewSet, basename='statistique')
+router.register('analyse', AnalyseViewSet, basename='analyse')
 
 urlpatterns = [
     path('', include(router.urls)),

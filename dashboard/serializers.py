@@ -1,42 +1,54 @@
-# dashboard/serializers.py
 from rest_framework import serializers
 
 
 class DashboardSummarySerializer(serializers.Serializer):
-    ventes = serializers.DictField()
-    achats = serializers.DictField()
-    stocks = serializers.DictField()
-    tresorerie = serializers.DictField()
-    clients_fournisseurs = serializers.DictField()
-    alertes = serializers.DictField()
+    """Résumé du tableau de bord"""
+    products = serializers.DictField()
+    sales = serializers.DictField()
+    purchases = serializers.DictField()
+    cash = serializers.DictField()
+    alerts = serializers.DictField()
+    recent_activities = serializers.ListField()
 
 
-class StatistiquesFilterSerializer(serializers.Serializer):
-    date_debut = serializers.DateField(required=False)
-    date_fin = serializers.DateField(required=False)
-    entrepot_id = serializers.IntegerField(required=False)
+class SalesStatsSerializer(serializers.Serializer):
+    """Statistiques de ventes"""
+    period = serializers.CharField()
+    total_sales = serializers.IntegerField()
+    total_amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    average_order = serializers.DecimalField(max_digits=15, decimal_places=2)
+    by_status = serializers.DictField()
 
 
-class StatistiquesSerializer(serializers.Serializer):
-    periode = serializers.DictField()
-    ventes = serializers.DictField()
-    achats = serializers.DictField()
-    tresorerie = serializers.DictField()
-    top_produits = serializers.ListField()
+class CashFlowSerializer(serializers.Serializer):
+    """Flux de trésorerie"""
+    date = serializers.DateField()
+    entries = serializers.DecimalField(max_digits=15, decimal_places=2)
+    exits = serializers.DecimalField(max_digits=15, decimal_places=2)
+    balance = serializers.DecimalField(max_digits=15, decimal_places=2)
 
 
-class TendancesSerializer(serializers.Serializer):
-    periode_label = serializers.CharField()
-    total_ventes = serializers.IntegerField()
-    montant_total = serializers.DecimalField(max_digits=15, decimal_places=2)
-    panier_moyen = serializers.DecimalField(max_digits=15, decimal_places=2)
+class TopProductsSerializer(serializers.Serializer):
+    """Top produits"""
+    product_id = serializers.IntegerField()
+    product_name = serializers.CharField()
+    quantity_sold = serializers.IntegerField()
+    total_amount = serializers.DecimalField(max_digits=15, decimal_places=2)
 
 
-class PrevisionsSerializer(serializers.Serializer):
-    previsions = serializers.DictField()
-    moyenne_mensuelle = serializers.DecimalField(
-        max_digits=15, decimal_places=2)
-    montant_mois_dernier = serializers.DecimalField(
-        max_digits=15, decimal_places=2)
-    evolution_pourcentage = serializers.DecimalField(
-        max_digits=10, decimal_places=2)
+class TopClientsSerializer(serializers.Serializer):
+    """Top clients"""
+    client_id = serializers.IntegerField()
+    client_name = serializers.CharField()
+    total_orders = serializers.IntegerField()
+    total_purchases = serializers.DecimalField(max_digits=15, decimal_places=2)
+
+
+class ActivitySerializer(serializers.Serializer):
+    """Activité récente"""
+    type = serializers.CharField()
+    reference = serializers.CharField()
+    date = serializers.DateTimeField()
+    amount = serializers.DecimalField(
+        max_digits=15, decimal_places=2, required=False)
+    user = serializers.CharField(required=False)
