@@ -1742,8 +1742,11 @@ class Facture(models.Model):
 # PAIEMENT
 # ============================================================
 
-class Paiement(models.Model):
+# apps/ventes_clients/models.py
 
+# ... imports existants ...
+
+class Paiement(models.Model):
     METHOD_CHOICES = (
         ("cash", "Espèces"),
         ("card", "Carte bancaire"),
@@ -1801,6 +1804,26 @@ class Paiement(models.Model):
 
     updated_at = models.DateTimeField(auto_now=True)
 
+    # ============================================================
+    # NOUVEAUX CHAMPS : DESTINATION DE L'ENCAISSEMENT
+    # ============================================================
+    caisse_destination = models.ForeignKey(
+        'tresorerie.Caisse',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='paiements_entrants',
+        verbose_name="Caisse de destination"
+    )
+    compte_destination = models.ForeignKey(
+        'tresorerie.CompteBancaire',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='paiements_entrants',
+        verbose_name="Compte bancaire de destination"
+    )
+
     class Meta:
         verbose_name = "Paiement"
         verbose_name_plural = "Paiements"
@@ -1813,6 +1836,7 @@ class Paiement(models.Model):
         )
 
     def clean(self):
+        # Validation du montant
         if self.amount <= 0:
             raise ValidationError(
                 "Le montant du paiement doit être supérieur à zéro."
@@ -1834,6 +1858,26 @@ class Paiement(models.Model):
             ):
                 raise ValidationError(
                     "Le paiement dépasse le montant restant."
+                )
+
+        # ============================================================
+        # NOUVELLE VALIDATION : DESTINATION UNIQUE
+        # ============================================================
+        if self.caisse_destination and self.compte_destination:
+            raise ValidationError(
+                "Vous ne pouvez choisir qu'une seule destination : caisse OU compte bancaire."
+            )
+
+        # Vérifier que la destination appartient au même entrepôt que la vente
+        if self.facture and self.facture.sale and self.facture.sale.warehouse:
+            warehouse = self.facture.sale.warehouse
+            if self.caisse_destination and self.caisse_destination.warehouse != warehouse:
+                raise ValidationError(
+                    "La caisse choisie n'appartient pas à l'entrepôt de la vente."
+                )
+            if self.compte_destination and self.compte_destination.warehouse != warehouse:
+                raise ValidationError(
+                    "Le compte bancaire choisi n'appartient pas à l'entrepôt de la vente."
                 )
 
     def generate_qr_code(self):
@@ -1914,8 +1958,6 @@ class Paiement(models.Model):
                     "updated_at"
                 ]
             )
-
-
 # ============================================================
 # AVOIR
 # ============================================================

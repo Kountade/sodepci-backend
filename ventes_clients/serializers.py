@@ -662,6 +662,9 @@ class FactureCreateSerializer(serializers.ModelSerializer):
 
 
 # ==================== PAIEMENT ====================
+# apps/ventes_clients/serializers.py
+
+# ==================== PAIEMENT ====================
 class PaiementSerializer(serializers.ModelSerializer):
     method_display = serializers.CharField(
         source='get_method_display', read_only=True)
@@ -680,6 +683,11 @@ class PaiementSerializer(serializers.ModelSerializer):
     qr_code_data = serializers.CharField(read_only=True)
     qr_code_url = serializers.SerializerMethodField()
 
+    caisse_destination_nom = serializers.CharField(
+        source='caisse_destination.nom', read_only=True)
+    compte_destination_nom = serializers.CharField(
+        source='compte_destination.nom', read_only=True)
+
     class Meta:
         model = Paiement
         fields = [
@@ -694,7 +702,9 @@ class PaiementSerializer(serializers.ModelSerializer):
             'remaining_amount',
             'facture_total',
             'notes',
-            'qr_code', 'qr_code_data', 'qr_code_url'
+            'qr_code', 'qr_code_data', 'qr_code_url',
+            'caisse_destination', 'caisse_destination_nom',
+            'compte_destination', 'compte_destination_nom',
         ]
         read_only_fields = ['id', 'payment_date', 'qr_code', 'qr_code_data']
 
@@ -714,6 +724,38 @@ class PaiementSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.qr_code.url)
             return obj.qr_code.url
         return None
+
+
+class PaiementCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Paiement
+        fields = [
+            'facture', 'amount', 'method', 'reference', 'notes',
+            'caisse_destination', 'compte_destination'
+        ]
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError(
+                "Le montant doit être supérieur à 0")
+        return value
+
+    def validate(self, data):
+        facture = data.get('facture')
+        amount = data.get('amount', 0)
+
+        if facture and amount > facture.remaining_amount:
+            raise serializers.ValidationError(
+                {"amount": f"Le montant dépasse le solde restant ({facture.remaining_amount:,.0f} FCFA)"}
+            )
+
+        caisse = data.get('caisse_destination')
+        compte = data.get('compte_destination')
+        if caisse and compte:
+            raise serializers.ValidationError(
+                "Choisissez une seule destination (caisse ou compte)."
+            )
+        return data
 
 
 class PaiementCreateSerializer(serializers.ModelSerializer):

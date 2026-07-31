@@ -1,4 +1,6 @@
 # apps/tresorerie/models.py
+from produits_stocks.models import Warehouse
+from django.core.exceptions import ValidationError  # <-- ajoutez si absent
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
@@ -445,6 +447,13 @@ class MouvementTresorerie(models.Model):
 # ============================================================
 # 4. FRAIS ET DÉPENSES
 # ============================================================
+# apps/tresorerie/models.py
+# ... gardez tous les imports existants, assurez-vous d'avoir :
+
+
+# ============================================================
+# 4. FRAIS ET DÉPENSES  (version corrigée)
+# ============================================================
 
 class Frais(models.Model):
     """
@@ -489,8 +498,11 @@ class Frais(models.Model):
 
     categorie = models.CharField(
         max_length=20, choices=CATEGORIE_FRAIS, verbose_name="Catégorie")
-    montant = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)],
-                                  verbose_name="Montant")
+    montant = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        validators=[MinValueValidator(0)],
+        verbose_name="Montant"
+    )
 
     date_frais = models.DateField(
         default=timezone.now, verbose_name="Date du frais")
@@ -500,11 +512,17 @@ class Frais(models.Model):
     beneficiaire = models.CharField(
         max_length=200, verbose_name="Bénéficiaire")
 
-    piece_justificative = models.CharField(max_length=50, blank=True, null=True,
-                                           verbose_name="Pièce justificative")
+    piece_justificative = models.CharField(
+        max_length=50, blank=True, null=True,
+        verbose_name="Pièce justificative"
+    )
 
-    mode_paiement = models.CharField(max_length=20, choices=MouvementTresorerie.MODE_PAIEMENT,
-                                     default='especes', verbose_name="Mode de paiement")
+    mode_paiement = models.CharField(
+        max_length=20,
+        choices=MouvementTresorerie.MODE_PAIEMENT,
+        default='especes',
+        verbose_name="Mode de paiement"
+    )
 
     # Lien vers le mouvement de trésorerie
     mouvement = models.ForeignKey(
@@ -526,8 +544,12 @@ class Frais(models.Model):
         verbose_name="Fournisseur"
     )
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='brouillon',
-                              verbose_name="Statut")
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='brouillon',
+        verbose_name="Statut"
+    )
 
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -548,7 +570,8 @@ class Frais(models.Model):
         verbose_name="Validé par"
     )
     date_validation = models.DateTimeField(
-        null=True, blank=True, verbose_name="Date validation")
+        null=True, blank=True, verbose_name="Date validation"
+    )
 
     class Meta:
         verbose_name = "Frais"
@@ -558,12 +581,17 @@ class Frais(models.Model):
     def __str__(self):
         return f"{self.reference} - {self.titre} ({self.montant:,.0f} XOF)"
 
+    # ============================================================
+    # MÉTHODE SAVE CORRIGÉE (avec caisse par défaut)
+    # ============================================================
     def save(self, *args, **kwargs):
+        # Génération automatique de la référence
         if not self.reference:
             from datetime import datetime
             prefix = f"FRAIS{datetime.now().strftime('%Y%m')}"
             last = Frais.objects.filter(
-                reference__startswith=prefix).order_by('-id').first()
+                reference__startswith=prefix
+            ).order_by('-id').first()
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -573,8 +601,22 @@ class Frais(models.Model):
             else:
                 self.reference = f"{prefix}0001"
 
+        # ✅ Création du mouvement de trésorerie si le frais est payé
         if self.status == 'paye' and not self.mouvement:
-            # Créer automatiquement un mouvement de trésorerie
+            # Récupérer la caisse par défaut de l'entrepôt
+            caisse_defaut = Caisse.objects.filter(
+                warehouse=self.warehouse,
+                is_default=True
+            ).first()
+
+            if not caisse_defaut:
+                # On empêche le passage à 'paye' si aucune caisse par défaut
+                raise ValidationError(
+                    f"Aucune caisse par défaut pour l'entrepôt '{self.warehouse.name}'. "
+                    "Veuillez configurer une caisse par défaut ou choisir une destination."
+                )
+
+            # Créer le mouvement de décaissement
             mouvement = MouvementTresorerie.objects.create(
                 type_mouvement='decaissement',
                 warehouse=self.warehouse,
@@ -583,20 +625,24 @@ class Frais(models.Model):
                 source_reference=self.reference,
                 montant=self.montant,
                 mode_paiement=self.mode_paiement,
+                caisse=caisse_defaut,          # ✅ On lie la caisse
                 date_mouvement=timezone.now(),
                 date_valeur=self.date_paiement or timezone.now().date(),
-                status='effectue',
+                status='effectue',             # Effectué immédiatement
                 libelle=f"Frais: {self.titre}",
                 created_by=self.created_by
             )
+            # Le mouvement a été créé avec status='effectue', sa méthode save()
+            # a automatiquement appelé _mettre_a_jour_soldes() qui diminue le solde.
             self.mouvement = mouvement
 
+        # Sauvegarde finale
         super().save(*args, **kwargs)
-
 
 # ============================================================
 # 5. PRÉVISIONS DE TRÉSORERIE
 # ============================================================
+
 
 class PrevisionTresorerie(models.Model):
     """
