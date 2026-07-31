@@ -382,6 +382,26 @@ class PurchaseOrderLine(models.Model):
 
 
 # ==================== RECEIPT WITH QR CODE ====================
+
+
+# apps/achats_fournisseurs/models.py
+
+from django.db import models
+from datetime import date, timedelta
+from decimal import Decimal
+from django.core.files import File
+from io import BytesIO
+import qrcode
+import json
+from django.utils import timezone
+
+from users.models import CustomUser
+from produits_stocks.models import Product, UnitMeasure, Warehouse, Lot, Stock, StockMovement
+from tresorerie.models import Caisse, CompteBancaire, MouvementTresorerie  # Ajout
+
+
+# ... autres classes (Supplier, etc.) ...
+
 class Receipt(models.Model):
     """
     Réception de marchandises avec QR Code
@@ -423,6 +443,38 @@ class Receipt(models.Model):
     qr_code = models.ImageField(
         upload_to='qrcodes/receipts/', null=True, blank=True, verbose_name="QR Code")
     qr_code_data = models.TextField(blank=True, verbose_name="Données QR Code")
+
+    # ============================================================
+    # NOUVEAUX CHAMPS : DESTINATION DU DÉCAISSEMENT
+    # ============================================================
+    caisse_destination = models.ForeignKey(
+        Caisse,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='receptions_sortantes',
+        verbose_name="Caisse de décaissement"
+    )
+    compte_destination = models.ForeignKey(
+        CompteBancaire,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='receptions_sortantes',
+        verbose_name="Compte bancaire de décaissement"
+    )
+    montant_decaissement = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Montant décaissé"
+    )
+    mouvement_tresorerie = models.ForeignKey(
+        MouvementTresorerie,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reception_associee',
+        verbose_name="Mouvement de trésorerie associé"
+    )
 
     # Métadonnées
     created_at = models.DateTimeField(auto_now_add=True)
@@ -487,7 +539,77 @@ class Receipt(models.Model):
             self.generate_qr_code()
             super().save(update_fields=['qr_code', 'qr_code_data'])
 
+    # ============================================================
+    # NOUVELLE MÉTHODE : CREER MOUVEMENT DE DECAISSEMENT
+    # ============================================================
+    def creer_mouvement_decaissement(self, user):
+        """
+        Crée un mouvement de trésorerie pour le décaissement lié à cette réception.
+        Retourne le mouvement créé ou None.
+        """
+        if not self.purchase_order:
+            return None
 
+        # Si déjà un mouvement, ne pas recréer
+        if self.mouvement_tresorerie:
+            return self.mouvement_tresorerie
+
+        # Calculer le montant à décaisser (somme des lignes reçues)
+        # On prend le total des lignes de réception qui ont une quantité reçue
+        total_recu = Decimal('0')
+        for line in self.lines.all():
+            if line.quantity_received > 0:
+                # Prix unitaire de la ligne de commande associée
+                unit_price = line.po_line.unit_price
+                total_recu += line.quantity_received * unit_price
+
+        if total_recu <= 0:
+            return None
+
+        self.montant_decaissement = total_recu
+
+        # Déterminer la destination
+        caisse = self.caisse_destination
+        compte = self.compte_destination
+
+        # Fallback : caisse par défaut si aucune destination choisie
+        if not caisse and not compte:
+            if self.warehouse:
+                caisse = Caisse.objects.filter(
+                    warehouse=self.warehouse,
+                    is_default=True
+                ).first()
+                if not caisse:
+                    # On peut aussi lever une erreur ou logger, on retourne None
+                    return None
+
+        # Créer le mouvement de décaissement
+        mouvement = MouvementTresorerie.objects.create(
+            type_mouvement='decaissement',
+            warehouse=self.warehouse,
+            source_type='achat',
+            source_id=self.purchase_order.id,
+            source_reference=self.purchase_order.po_number,
+            montant=total_recu,
+            mode_paiement='virement',  # on pourrait avoir un champ mode_paiement sur la réception
+            caisse=caisse,
+            compte_bancaire=compte,
+            date_mouvement=timezone.now(),
+            date_valeur=timezone.now().date(),
+            status='effectue',
+            libelle=f"Décaissement pour réception {self.receipt_number} - commande {self.purchase_order.po_number}",
+            purchase_order=self.purchase_order,
+            created_by=user
+        )
+        # La méthode save() de MouvementTresorerie appelle _mettre_a_jour_soldes()
+        # car status='effectue' et c'est une nouvelle instance. Mais pour être sûr, on force :
+        mouvement._mettre_a_jour_soldes()
+        mouvement.save()
+
+        self.mouvement_tresorerie = mouvement
+        self.save(update_fields=['montant_decaissement', 'mouvement_tresorerie'])
+
+        return mouvement
 class ReceiptLine(models.Model):
     """
     Ligne de réception

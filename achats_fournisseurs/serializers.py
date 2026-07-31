@@ -277,6 +277,12 @@ class PurchaseOrderApproveSerializer(serializers.Serializer):
 
 
 # ==================== RECEIPT ====================
+# apps/achats_fournisseurs/serializers.py
+
+# ... imports existants ...
+
+# ==================== RECEIPT ====================
+
 class ReceiptLineSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_code = serializers.CharField(source='product.code', read_only=True)
@@ -352,6 +358,16 @@ class ReceiptDetailSerializer(serializers.ModelSerializer):
     qr_code_data = serializers.CharField(read_only=True)
     qr_code_url = serializers.SerializerMethodField()
 
+    # ============================================================
+    # NOUVEAUX CHAMPS DE DESTINATION
+    # ============================================================
+    caisse_destination_nom = serializers.CharField(
+        source='caisse_destination.nom', read_only=True)
+    compte_destination_nom = serializers.CharField(
+        source='compte_destination.nom', read_only=True)
+    mouvement_reference = serializers.CharField(
+        source='mouvement_tresorerie.reference', read_only=True)
+
     class Meta:
         model = Receipt
         fields = [
@@ -359,10 +375,14 @@ class ReceiptDetailSerializer(serializers.ModelSerializer):
             'receipt_date', 'expected_date', 'warehouse', 'warehouse_name',
             'status', 'status_display', 'notes', 'delivery_note', 'invoice_number',
             'lines', 'created_at', 'created_by', 'created_by_name',
-            'qr_code', 'qr_code_data', 'qr_code_url'
+            'qr_code', 'qr_code_data', 'qr_code_url',
+            # Nouveaux champs
+            'caisse_destination', 'caisse_destination_nom',
+            'compte_destination', 'compte_destination_nom',
+            'montant_decaissement', 'mouvement_reference'
         ]
-        read_only_fields = ['id', 'receipt_number',
-                            'receipt_date', 'qr_code', 'qr_code_data']
+        read_only_fields = ['id', 'receipt_number', 'receipt_date',
+                            'qr_code', 'qr_code_data', 'montant_decaissement']
 
     def get_qr_code_url(self, obj):
         if obj.qr_code:
@@ -372,16 +392,17 @@ class ReceiptDetailSerializer(serializers.ModelSerializer):
             return obj.qr_code.url
         return None
 
-# apps/achats_fournisseurs/serializers.py
-
 
 class ReceiptCreateSerializer(serializers.ModelSerializer):
     lines = ReceiptLineCreateSerializer(many=True)
 
     class Meta:
         model = Receipt
-        fields = ['purchase_order', 'expected_date', 'warehouse',
-                  'delivery_note', 'invoice_number', 'notes', 'lines']
+        fields = [
+            'purchase_order', 'expected_date', 'warehouse',
+            'delivery_note', 'invoice_number', 'notes', 'lines',
+            'caisse_destination', 'compte_destination'  # Ajout
+        ]
 
     def validate(self, data):
         purchase_order = data.get('purchase_order')
@@ -404,12 +425,24 @@ class ReceiptCreateSerializer(serializers.ModelSerializer):
                     f"Quantité reçue ({quantity_received}) dépasse la quantité restante ({quantity_remaining})"
                 )
 
+        # ============================================================
+        # NOUVELLE VALIDATION : DESTINATION UNIQUE
+        # ============================================================
+        caisse = data.get('caisse_destination')
+        compte = data.get('compte_destination')
+        if caisse and compte:
+            raise serializers.ValidationError(
+                "Choisissez une seule destination (caisse ou compte)."
+            )
+        # Si aucune destination, on utilisera la caisse par défaut dans le modèle
+
         return data
 
     @transaction.atomic
     def create(self, validated_data):
         from produits_stocks.models import Stock, StockMovement
         from django.db import transaction
+        from datetime import date
 
         lines_data = validated_data.pop('lines')
         purchase_order = validated_data.get('purchase_order')
@@ -447,28 +480,21 @@ class ReceiptCreateSerializer(serializers.ModelSerializer):
             product = po_line.product
             lot = None
 
-            # Gestion du lot
+            # Gestion du lot (identique à l'existant)
             if lot_number:
-                # Vérifier si le lot existe déjà
                 existing_lot = Lot.objects.filter(
                     lot_number=lot_number).first()
-
                 if existing_lot:
-                    # Lot existant - on ajoute la quantité
                     lot = existing_lot
-                    # Si le lot n'a pas d'entrepôt ou est différent, on met à jour
                     if not lot.warehouse:
                         lot.warehouse = warehouse
-                    # Ajouter la quantité reçue
                     lot.current_quantity += quantity_received
-                    # Mettre à jour les dates si elles ne sont pas définies
                     if expiry_date and not lot.expiry_date:
                         lot.expiry_date = expiry_date
                     if manufacturing_date and not lot.manufacturing_date:
                         lot.manufacturing_date = manufacturing_date
                     lot.save()
                 else:
-                    # Créer un nouveau lot
                     lot = Lot.objects.create(
                         lot_number=lot_number,
                         product=product,
@@ -483,7 +509,6 @@ class ReceiptCreateSerializer(serializers.ModelSerializer):
                         status='good'
                     )
             else:
-                # Si pas de numéro de lot, on crée un lot automatiquement
                 auto_lot_number = f"LOT-{product.code}-{date.today().strftime('%Y%m%d')}-{ReceiptLine.objects.filter(product=product).count() + 1}"
                 lot = Lot.objects.create(
                     lot_number=auto_lot_number,
@@ -515,8 +540,7 @@ class ReceiptCreateSerializer(serializers.ModelSerializer):
                 notes=notes
             )
 
-            # --- CORRECTION : MISE À JOUR DU STOCK ---
-            # 1. Récupérer ou créer le stock pour ce produit dans cet entrepôt
+            # Mise à jour du stock
             stock, created = Stock.objects.get_or_create(
                 product=product,
                 warehouse=warehouse,
@@ -525,12 +549,8 @@ class ReceiptCreateSerializer(serializers.ModelSerializer):
                     'reserved_quantity': 0
                 }
             )
-
-            # 2. IMPORTANT : Recalculer la quantité totale à partir des lots
-            # Cela évite le double comptage car on ne fait PAS d'addition manuelle
             stock.update_quantity()
 
-            # 3. Créer le mouvement de stock
             StockMovement.objects.create(
                 product=product,
                 lot=lot,
@@ -563,12 +583,16 @@ class ReceiptCreateSerializer(serializers.ModelSerializer):
         receipt.status = 'completed'
         receipt.save()
 
+        # ============================================================
+        # NOUVEAU : CRÉATION DU MOUVEMENT DE TRÉSORERIE (DÉCAISSEMENT)
+        # ============================================================
+        receipt.creer_mouvement_decaissement(user)
+
         # Générer le QR Code après la création
         receipt.generate_qr_code()
         receipt.save()
 
         return receipt
-
 # ==================== PURCHASE RETURN ====================
 
 
