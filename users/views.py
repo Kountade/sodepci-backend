@@ -1,3 +1,4 @@
+# views.py
 from rest_framework import viewsets, permissions, status
 from .serializers import (
     LoginSerializer, RegisterSerializer, UserSerializer,
@@ -6,6 +7,7 @@ from .serializers import (
 from django.contrib.auth import get_user_model, authenticate
 from rest_framework.response import Response
 from knox.models import AuthToken
+from .permissions import IsAdmin  # Importez vos permissions
 
 User = get_user_model()
 
@@ -21,7 +23,6 @@ class LoginViewset(viewsets.ViewSet):
             password = serializer.validated_data['password']
             user = authenticate(request, email=email, password=password)
 
-            # Vérification explicite que l'utilisateur est actif
             if user is not None and user.is_active:
                 _, token = AuthToken.objects.create(user)
                 return Response({
@@ -63,29 +64,35 @@ class UserViewset(viewsets.ViewSet):
             return UserWriteSerializer
         return UserSerializer
 
-    def is_super_admin(self, user):
-        return user.role == 'super_admin'
+    # CORRECTION ICI : Vérifier si l'utilisateur est admin (pas super_admin)
+    def is_admin(self, user):
+        return user.role == 'admin'  # Changé de 'super_admin' à 'admin'
 
     def list(self, request):
-        if self.is_super_admin(request.user):
+        # Les admins voient tous les utilisateurs
+        if self.is_admin(request.user):
             queryset = User.objects.all().order_by('-created_at')
         else:
+            # Les vendeurs voient seulement leur propre profil
             queryset = User.objects.filter(id=request.user.id)
         serializer = UserSerializer(queryset, many=True)
         return Response(serializer.data)
 
     def create(self, request):
-        if not self.is_super_admin(request.user):
+        # Seuls les admins peuvent créer des utilisateurs
+        if not self.is_admin(request.user):
             return Response(
-                {"error": "Seul un administrateur général peut créer des utilisateurs"},
+                {"error": "Seul un administrateur peut créer des utilisateurs"},
                 status=status.HTTP_403_FORBIDDEN
             )
 
         serializer = UserWriteSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
-            user.created_by = request.user
-            user.save(update_fields=['created_by'])
+            # Si le champ created_by existe dans votre modèle
+            if hasattr(user, 'created_by'):
+                user.created_by = request.user
+                user.save(update_fields=['created_by'])
             return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -95,11 +102,17 @@ class UserViewset(viewsets.ViewSet):
         except User.DoesNotExist:
             return Response({"error": "Utilisateur non trouvé"}, status=404)
 
-        if not self.is_super_admin(request.user) and request.user.id != user.id:
-            return Response({"error": "Permission refusée"}, status=403)
+        # Admin peut voir n'importe quel utilisateur
+        if self.is_admin(request.user):
+            serializer = UserDetailSerializer(user)
+            return Response(serializer.data)
 
-        serializer = UserDetailSerializer(user)
-        return Response(serializer.data)
+        # Vendeur ne peut voir que son propre profil
+        if request.user.id == user.id:
+            serializer = UserDetailSerializer(user)
+            return Response(serializer.data)
+
+        return Response({"error": "Permission refusée"}, status=403)
 
     def update(self, request, pk=None):
         try:
@@ -107,14 +120,23 @@ class UserViewset(viewsets.ViewSet):
         except User.DoesNotExist:
             return Response({"error": "Utilisateur non trouvé"}, status=404)
 
-        if not self.is_super_admin(request.user) and request.user.id != user.id:
-            return Response({"error": "Permission refusée"}, status=403)
+        # Admin peut modifier n'importe quel utilisateur
+        if self.is_admin(request.user):
+            serializer = UserWriteSerializer(user, data=request.data)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(UserSerializer(user).data)
+            return Response(serializer.errors, status=400)
 
-        serializer = UserWriteSerializer(user, data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(UserSerializer(user).data)
-        return Response(serializer.errors, status=400)
+        # Vendeur ne peut modifier que son propre profil
+        if request.user.id == user.id:
+            serializer = UserWriteSerializer(user, data=request.data)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(UserSerializer(user).data)
+            return Response(serializer.errors, status=400)
+
+        return Response({"error": "Permission refusée"}, status=403)
 
     def partial_update(self, request, pk=None):
         try:
@@ -122,19 +144,31 @@ class UserViewset(viewsets.ViewSet):
         except User.DoesNotExist:
             return Response({"error": "Utilisateur non trouvé"}, status=404)
 
-        if not self.is_super_admin(request.user) and request.user.id != user.id:
-            return Response({"error": "Permission refusée"}, status=403)
+        # Admin peut modifier n'importe quel utilisateur
+        if self.is_admin(request.user):
+            serializer = UserWriteSerializer(
+                user, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(UserSerializer(user).data)
+            return Response(serializer.errors, status=400)
 
-        serializer = UserWriteSerializer(user, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(UserSerializer(user).data)
-        return Response(serializer.errors, status=400)
+        # Vendeur ne peut modifier que son propre profil
+        if request.user.id == user.id:
+            serializer = UserWriteSerializer(
+                user, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(UserSerializer(user).data)
+            return Response(serializer.errors, status=400)
+
+        return Response({"error": "Permission refusée"}, status=403)
 
     def destroy(self, request, pk=None):
-        if not self.is_super_admin(request.user):
+        # Seul un admin peut supprimer des utilisateurs
+        if not self.is_admin(request.user):
             return Response(
-                {"error": "Seul un administrateur général peut supprimer des utilisateurs"},
+                {"error": "Seul un administrateur peut supprimer des utilisateurs"},
                 status=403
             )
 
