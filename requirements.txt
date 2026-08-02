@@ -13,6 +13,7 @@ djangorestframework==3.17.1
 gunicorn==26.0.0
 packaging==26.2
 pillow==12.3.0
+psycopg2-binary==2.9.12
 pydantic==2.13.4
 pydantic_core==2.46.4
 qrcode==8.2
