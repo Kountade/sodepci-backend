@@ -164,17 +164,17 @@ def creer_mouvement_paiement(sender, instance, created, **kwargs):
             caisse.solde_actuel += instance.amount
             caisse.save(update_fields=['solde_actuel', 'updated_at'])
             logger.info(
-                f"💰 Caisse {caisse.nom} augmentée de {instance.amount:,.0f} FCFA")
+                f" Caisse {caisse.nom} augmentée de {instance.amount:,.0f} FCFA")
 
         # Mettre à jour le solde du compte
         if compte:
             compte.solde_actuel += instance.amount
             compte.save(update_fields=['solde_actuel', 'updated_at'])
             logger.info(
-                f"💰 Compte {compte.nom} augmenté de {instance.amount:,.0f} FCFA")
+                f" Compte {compte.nom} augmenté de {instance.amount:,.0f} FCFA")
 
         logger.info(
-            f"✅ Mouvement de trésorerie créé par signal pour le paiement {instance.id}")
+            f" Mouvement de trésorerie créé par signal pour le paiements {instance.id}")
 
     except Exception as e:
-        logger.error(f"❌ Erreur dans le signal creer_mouvement_paiement: {e}")
+        logger.error(f" Erreur dans le signal creer_mouvement_paiement: {e}")

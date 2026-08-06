@@ -1,4 +1,4 @@
-# apps/achats_fournisseurs/models.py
+# apps/achats_fournisseurs/models.py - Version COMPLÈTE
 from django.db.models import Sum, F
 from datetime import date, timedelta
 from decimal import Decimal
@@ -14,8 +14,6 @@ from django.utils import timezone
 
 from users.models import CustomUser
 from produits_stocks.models import Product, UnitMeasure, Warehouse, Lot, Stock, StockMovement
-
-# ⚠️ AUCUN IMPORT DE tresorerie.models ICI
 
 
 # ============================================================
@@ -73,18 +71,7 @@ def generate_qr_image(data):
 # FOURNISSEUR
 # ============================================================
 
-# apps/achats_fournisseurs/models.py
-# Partie Supplier uniquement - COMPLET
-
-
-# ============================================================
-# FOURNISSEUR - COMPLET
-# ============================================================
-
 class Supplier(models.Model):
-    """
-    Fournisseur - Modèle complet avec toutes les propriétés
-    """
     TYPE_CHOICES = (
         ('local', 'Local'),
         ('international', 'International'),
@@ -102,155 +89,54 @@ class Supplier(models.Model):
         ('90', '90 jours'),
     )
 
-    # ========== IDENTIFIANTS ==========
-    code = models.CharField(
-        max_length=50,
-        unique=True,
-        verbose_name="Code fournisseur"
-    )
+    code = models.CharField(max_length=50, unique=True,
+                            verbose_name="Code fournisseur")
     name = models.CharField(
-        max_length=200,
-        verbose_name="Nom / Raison sociale"
-    )
+        max_length=200, verbose_name="Nom / Raison sociale")
     commercial_name = models.CharField(
-        max_length=200,
-        blank=True,
-        verbose_name="Nom commercial"
-    )
-
-    # ========== TYPE ==========
+        max_length=200, blank=True, verbose_name="Nom commercial")
     type = models.CharField(
-        max_length=20,
-        choices=TYPE_CHOICES,
-        default='local',
-        verbose_name="Type"
-    )
-
-    # ========== CONTACTS ==========
+        max_length=20, choices=TYPE_CHOICES, default='local', verbose_name="Type")
     contact_person = models.CharField(
-        max_length=100,
-        blank=True,
-        verbose_name="Personne de contact"
-    )
-    phone = models.CharField(
-        max_length=20,
-        verbose_name="Téléphone"
-    )
-    mobile = models.CharField(
-        max_length=20,
-        blank=True,
-        verbose_name="Mobile"
-    )
-    email = models.EmailField(
-        verbose_name="Email"
-    )
-    website = models.URLField(
-        blank=True,
-        verbose_name="Site web"
-    )
-
-    # ========== ADRESSE ==========
-    address = models.TextField(
-        verbose_name="Adresse"
-    )
-    city = models.CharField(
-        max_length=100,
-        verbose_name="Ville"
-    )
+        max_length=100, blank=True, verbose_name="Personne de contact")
+    phone = models.CharField(max_length=20, verbose_name="Téléphone")
+    mobile = models.CharField(max_length=20, blank=True, verbose_name="Mobile")
+    email = models.EmailField(verbose_name="Email")
+    website = models.URLField(blank=True, verbose_name="Site web")
+    address = models.TextField(verbose_name="Adresse")
+    city = models.CharField(max_length=100, verbose_name="Ville")
     country = models.CharField(
-        max_length=100,
-        default='Sénégal',
-        verbose_name="Pays"
-    )
+        max_length=100, default='Sénégal', verbose_name="Pays")
     postal_code = models.CharField(
-        max_length=20,
-        blank=True,
-        verbose_name="Code postal"
-    )
-
-    # ========== INFORMATIONS FISCALES ==========
+        max_length=20, blank=True, verbose_name="Code postal")
     tax_id = models.CharField(
-        max_length=50,
-        blank=True,
-        verbose_name="N° Identification fiscale"
-    )
+        max_length=50, blank=True, verbose_name="N° Identification fiscale")
     registration_number = models.CharField(
-        max_length=50,
-        blank=True,
-        verbose_name="N° Registre de commerce"
-    )
-
-    # ========== CONDITIONS COMMERCIALES ==========
+        max_length=50, blank=True, verbose_name="N° Registre de commerce")
     payment_terms = models.CharField(
-        max_length=20,
-        choices=PAYMENT_TERMS_CHOICES,
-        default='30',
-        verbose_name="Délai de paiement"
-    )
+        max_length=20, choices=PAYMENT_TERMS_CHOICES, default='30', verbose_name="Délai de paiement")
     delivery_lead_time = models.IntegerField(
-        default=7,
-        verbose_name="Délai de livraison (jours)"
-    )
+        default=7, verbose_name="Délai de livraison (jours)")
     minimum_order = models.IntegerField(
-        default=0,
-        verbose_name="Commande minimum"
-    )
-
-    # ========== ÉVALUATION ==========
+        default=0, verbose_name="Commande minimum")
     rating = models.DecimalField(
-        max_digits=3,
-        decimal_places=2,
-        default=0,
-        verbose_name="Note (0-5)"
-    )
+        max_digits=3, decimal_places=2, default=0, verbose_name="Note (0-5)")
     total_purchases = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=0,
-        verbose_name="Total achats"
-    )
+        max_digits=15, decimal_places=2, default=0, verbose_name="Total achats")
     total_orders = models.IntegerField(
-        default=0,
-        verbose_name="Nombre de commandes"
-    )
+        default=0, verbose_name="Nombre de commandes")
     on_time_delivery_rate = models.DecimalField(
-        max_digits=5,
-        decimal_places=2,
-        default=0,
-        verbose_name="Taux livraison à temps (%)"
-    )
-
-    # ========== STATUT ==========
-    is_active = models.BooleanField(
-        default=True,
-        verbose_name="Actif"
-    )
+        max_digits=5, decimal_places=2, default=0, verbose_name="Taux livraison à temps (%)")
+    is_active = models.BooleanField(default=True, verbose_name="Actif")
     is_preferred = models.BooleanField(
-        default=False,
-        verbose_name="Fournisseur privilégié"
-    )
-    notes = models.TextField(
-        blank=True,
-        verbose_name="Notes"
-    )
-
-    # ========== MÉTADONNÉES ==========
+        default=False, verbose_name="Fournisseur privilégié")
+    notes = models.TextField(blank=True, verbose_name="Notes")
     created_at = models.DateTimeField(
-        auto_now_add=True,
-        verbose_name="Date création"
-    )
+        auto_now_add=True, verbose_name="Date création")
     updated_at = models.DateTimeField(
-        auto_now=True,
-        verbose_name="Date modification"
-    )
-    created_by = models.ForeignKey(
-        CustomUser,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='fournisseurs_created',
-        verbose_name="Créé par"
-    )
+        auto_now=True, verbose_name="Date modification")
+    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name='fournisseurs_created', verbose_name="Créé par")
 
     class Meta:
         verbose_name = "Fournisseur"
@@ -260,20 +146,13 @@ class Supplier(models.Model):
     def __str__(self):
         return f"{self.code} - {self.name}"
 
-    # ========== PROPRIÉTÉS ==========
-
     @property
     def full_address(self):
-        """Adresse complète formatée"""
         parts = [self.address, self.city, self.country]
         return ", ".join([p for p in parts if p])
 
     @property
     def total_debt(self):
-        """
-        ✅ Total de la dette envers ce fournisseur
-        Calculé à partir des factures non payées
-        """
         total = self.invoices.filter(
             paiement_status__in=['unpaid', 'partial', 'overdue']
         ).aggregate(
@@ -283,10 +162,6 @@ class Supplier(models.Model):
 
     @property
     def overdue_debt(self):
-        """
-        ✅ Dette en retard envers ce fournisseur
-        Calculé à partir des factures en retard
-        """
         total = self.invoices.filter(
             due_date__lt=date.today(),
             paiement_status__in=['unpaid', 'partial']
@@ -295,159 +170,8 @@ class Supplier(models.Model):
         )['total']
         return total or Decimal('0')
 
-    @property
-    def total_invoices_count(self):
-        """Nombre total de factures"""
-        return self.invoices.count()
-
-    @property
-    def unpaid_invoices_count(self):
-        """Nombre de factures non payées"""
-        return self.invoices.filter(
-            paiement_status__in=['unpaid', 'partial', 'overdue']
-        ).count()
-
-    @property
-    def average_purchase_amount(self):
-        """Montant moyen des achats"""
-        if self.total_orders == 0:
-            return Decimal('0')
-        return self.total_purchases / self.total_orders
-
-    @property
-    def is_good_standing(self):
-        """Vérifie si le fournisseur est en bon standing"""
-        return self.overdue_debt == Decimal('0')
-
-    @property
-    def payment_terms_label(self):
-        """Libellé des conditions de paiement"""
-        return dict(self.PAYMENT_TERMS_CHOICES).get(self.payment_terms, self.payment_terms)
-
-    @property
-    def type_label(self):
-        """Libellé du type de fournisseur"""
-        return dict(self.TYPE_CHOICES).get(self.type, self.type)
-
-    # ========== MÉTHODES ==========
-
-    def update_total_purchases(self):
-        """
-        Met à jour le total des achats
-        """
-        from django.db.models import Sum
-
-        total = self.purchase_orders.filter(
-            status__in=['confirmed', 'partial', 'received']
-        ).aggregate(
-            total=Sum('total')
-        )['total'] or Decimal('0')
-
-        self.total_purchases = total
-        self.total_orders = self.purchase_orders.count()
-        self.save(update_fields=['total_purchases', 'total_orders'])
-
-    def get_contacts(self):
-        """Récupère tous les contacts"""
-        return self.contacts.all()
-
-    def get_primary_contact(self):
-        """Récupère le contact principal"""
-        return self.contacts.filter(is_primary=True).first()
-
-    def get_products(self):
-        """Récupère tous les produits du fournisseur"""
-        return self.products.filter(is_active=True)
-
-    def get_purchase_orders(self, status=None):
-        """Récupère les commandes du fournisseur"""
-        queryset = self.purchase_orders.all()
-        if status:
-            queryset = queryset.filter(status=status)
-        return queryset.order_by('-order_date')
-
-    def get_invoices(self, status=None):
-        """Récupère les factures du fournisseur"""
-        queryset = self.invoices.all()
-        if status:
-            queryset = queryset.filter(status=status)
-        return queryset.order_by('-invoice_date')
-
-    def get_debt_detail(self):
-        """
-        ✅ Détail de la dette du fournisseur
-        Retourne un dictionnaire avec les détails
-        """
-        invoices = self.invoices.filter(
-            paiement_status__in=['unpaid', 'partial', 'overdue']
-        )
-
-        detail = {
-            'total_debt': self.total_debt,
-            'overdue_debt': self.overdue_debt,
-            'invoices_count': invoices.count(),
-            'overdue_invoices_count': invoices.filter(
-                due_date__lt=date.today()
-            ).count(),
-            'invoices': []
-        }
-
-        for invoice in invoices:
-            detail['invoices'].append({
-                'id': invoice.id,
-                'invoice_number': invoice.invoice_number,
-                'total_amount': invoice.total_amount,
-                'amount_paid': invoice.amount_paid,
-                'remaining': invoice.remaining_amount,
-                'due_date': invoice.due_date,
-                'is_overdue': invoice.is_overdue,
-                'days_overdue': invoice.days_overdue,
-                'status': invoice.paiement_status
-            })
-
-        return detail
-
-    def to_dict(self):
-        """Convertit le fournisseur en dictionnaire"""
-        return {
-            'id': self.id,
-            'code': self.code,
-            'name': self.name,
-            'commercial_name': self.commercial_name,
-            'type': self.type,
-            'type_label': self.type_label,
-            'contact_person': self.contact_person,
-            'phone': self.phone,
-            'mobile': self.mobile,
-            'email': self.email,
-            'website': self.website,
-            'address': self.address,
-            'city': self.city,
-            'country': self.country,
-            'postal_code': self.postal_code,
-            'tax_id': self.tax_id,
-            'registration_number': self.registration_number,
-            'payment_terms': self.payment_terms,
-            'payment_terms_label': self.payment_terms_label,
-            'delivery_lead_time': self.delivery_lead_time,
-            'minimum_order': self.minimum_order,
-            'rating': str(self.rating),
-            'total_purchases': str(self.total_purchases),
-            'total_orders': self.total_orders,
-            'on_time_delivery_rate': str(self.on_time_delivery_rate),
-            'is_active': self.is_active,
-            'is_preferred': self.is_preferred,
-            'is_good_standing': self.is_good_standing,
-            'total_debt': str(self.total_debt),
-            'overdue_debt': str(self.overdue_debt),
-            'notes': self.notes,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-        }
-
 
 class SupplierContact(models.Model):
-    """Contact chez le fournisseur"""
     supplier = models.ForeignKey(
         Supplier, on_delete=models.CASCADE, related_name='contacts')
     name = models.CharField(max_length=100, verbose_name="Nom complet")
@@ -470,7 +194,6 @@ class SupplierContact(models.Model):
 
 
 class SupplierProduct(models.Model):
-    """Produits proposés par le fournisseur"""
     supplier = models.ForeignKey(
         Supplier, on_delete=models.CASCADE, related_name='products')
     product = models.ForeignKey(
@@ -501,7 +224,6 @@ class SupplierProduct(models.Model):
 # ============================================================
 
 class PurchaseOrder(models.Model):
-    """Bon de commande avec QR Code"""
     STATUS_CHOICES = (
         ('draft', 'Brouillon'),
         ('sent', 'Envoyé'),
@@ -554,7 +276,6 @@ class PurchaseOrder(models.Model):
     tracking_number = models.CharField(
         max_length=100, blank=True, verbose_name="N° de suivi")
 
-    # Suivi des réceptions et paiements
     total_received_amount = models.DecimalField(
         max_digits=15, decimal_places=2, default=0, verbose_name="Montant total reçu")
     total_invoiced_amount = models.DecimalField(
@@ -568,12 +289,10 @@ class PurchaseOrder(models.Model):
     is_fully_paid = models.BooleanField(
         default=False, verbose_name="Entièrement payée")
 
-    # QR Code
     qr_code = models.ImageField(
         upload_to='qrcodes/purchase_orders/', null=True, blank=True, verbose_name="QR Code")
     qr_code_data = models.TextField(blank=True, verbose_name="Données QR Code")
 
-    # Métadonnées
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
@@ -654,7 +373,6 @@ class PurchaseOrder(models.Model):
         self.save(update_fields=['total_invoiced_amount', 'is_fully_invoiced'])
 
     def update_payment_status(self):
-        # Import local pour éviter les problèmes
         from .models import FournisseurPaiement
         total_paid = self.paiements.filter(status='confirmed').aggregate(
             total=Sum('amount'))['total'] or 0
@@ -694,7 +412,6 @@ class PurchaseOrder(models.Model):
 
 
 class PurchaseOrderLine(models.Model):
-    """Ligne de bon de commande"""
     purchase_order = models.ForeignKey(
         PurchaseOrder, on_delete=models.CASCADE, related_name='lines')
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
@@ -729,11 +446,10 @@ class PurchaseOrderLine(models.Model):
 
 
 # ============================================================
-# RÉCEPTION (CORRIGÉ - SANS FK VERS TRESORERIE)
+# RÉCEPTION
 # ============================================================
 
 class Receipt(models.Model):
-    """Réception de marchandises"""
     STATUS_CHOICES = (
         ('pending', 'En attente'),
         ('in_progress', 'En cours'),
@@ -758,7 +474,20 @@ class Receipt(models.Model):
     invoice_number = models.CharField(
         max_length=100, blank=True, verbose_name="N° Facture")
 
-    # ⚠️ UTILISATION D'IntegerField POUR ÉVITER LES IMPORTS CIRCULAIRES
+    is_invoiced = models.BooleanField(default=False, verbose_name="Facturée")
+    supplier_invoice = models.ForeignKey(
+        'SupplierInvoice',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='receipts',
+        verbose_name="Facture associée"
+    )
+    auto_invoice = models.BooleanField(
+        default=True, verbose_name="Créer facture automatiquement")
+    auto_invoice_number = models.CharField(
+        max_length=100, blank=True, verbose_name="N° Facture auto")
+
     caisse_destination_id = models.IntegerField(
         null=True, blank=True, verbose_name="ID Caisse de décaissement")
     compte_destination_id = models.IntegerField(
@@ -768,12 +497,10 @@ class Receipt(models.Model):
     mouvement_tresorerie_id = models.IntegerField(
         null=True, blank=True, verbose_name="ID Mouvement de trésorerie")
 
-    # QR Code
     qr_code = models.ImageField(
         upload_to='qrcodes/receipts/', null=True, blank=True, verbose_name="QR Code")
     qr_code_data = models.TextField(blank=True, verbose_name="Données QR Code")
 
-    # Métadonnées
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
                                    blank=True, related_name='receptions_created', verbose_name="Réceptionné par")
@@ -785,6 +512,13 @@ class Receipt(models.Model):
 
     def __str__(self):
         return f"{self.receipt_number} - {self.purchase_order.po_number}"
+
+    @property
+    def total_received_amount(self):
+        total = Decimal('0')
+        for line in self.lines.all():
+            total += line.quantity_received * line.po_line.unit_price
+        return total
 
     def generate_qr_code(self):
         if not self.receipt_number:
@@ -806,28 +540,21 @@ class Receipt(models.Model):
         self.qr_code.save(filename, File(buffer), save=False)
 
     def creer_mouvement_decaissement(self, user):
-        """Crée un mouvement de trésorerie pour le décaissement"""
         if self.mouvement_tresorerie_id:
             return self.mouvement_tresorerie_id
 
-        # Import différé pour éviter les imports circulaires
         try:
             from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
         except ImportError:
             return None
 
-        # Calculer le montant
-        total_recu = Decimal('0')
-        for line in self.lines.all():
-            if line.quantity_received > 0:
-                total_recu += line.quantity_received * line.po_line.unit_price
+        total_recu = self.total_received_amount
 
         if total_recu <= 0:
             return None
 
         self.montant_decaissement = total_recu
 
-        # Récupérer la caisse ou le compte
         caisse = None
         compte = None
 
@@ -854,7 +581,6 @@ class Receipt(models.Model):
         if not caisse and not compte:
             return None
 
-        # Créer le mouvement
         mouvement = MouvementTresorerie.objects.create(
             type_mouvement='decaissement',
             warehouse=self.warehouse,
@@ -887,7 +613,6 @@ class Receipt(models.Model):
 
 
 class ReceiptLine(models.Model):
-    """Ligne de réception"""
     receipt = models.ForeignKey(
         Receipt, on_delete=models.CASCADE, related_name='lines')
     po_line = models.ForeignKey(
@@ -929,11 +654,10 @@ class ReceiptLine(models.Model):
 
 
 # ============================================================
-# RETOUR FOURNISSEUR
+# RETOUR FOURNISSEUR - AJOUTÉ
 # ============================================================
 
 class PurchaseReturn(models.Model):
-    """Retour fournisseur"""
     REASON_CHOICES = (
         ('defective', 'Produit défectueux'),
         ('wrong_product', 'Produit incorrect'),
@@ -1005,7 +729,6 @@ class PurchaseReturn(models.Model):
 
 
 class PurchaseReturnLine(models.Model):
-    """Ligne de retour fournisseur"""
     purchase_return = models.ForeignKey(
         PurchaseReturn, on_delete=models.CASCADE, related_name='lines')
     receipt_line = models.ForeignKey(
@@ -1017,17 +740,25 @@ class PurchaseReturnLine(models.Model):
     total = models.DecimalField(
         max_digits=10, decimal_places=2, verbose_name="Total")
 
+    class Meta:
+        verbose_name = "Ligne de retour"
+        verbose_name_plural = "Lignes de retour"
+
+    def __str__(self):
+        return f"{self.purchase_return.return_number} - {self.product.name}"
+
     def save(self, *args, **kwargs):
         self.total = self.quantity * self.unit_price
         super().save(*args, **kwargs)
 
 
 # ============================================================
-# FACTURE FOURNISSEUR
+# FACTURE FOURNISSEUR - CORRIGÉ
 # ============================================================
+# apps/achats_fournisseurs/models.py - Partie SupplierInvoice
 
 class SupplierInvoice(models.Model):
-    """Facture fournisseur"""
+    """Facture fournisseur avec suivi des paiements"""
     STATUS_CHOICES = (
         ('received', 'Reçue'),
         ('verified', 'Vérifiée'),
@@ -1051,19 +782,21 @@ class SupplierInvoice(models.Model):
     invoice_date = models.DateField(verbose_name="Date facture")
     due_date = models.DateField(verbose_name="Date d'échéance")
     amount = models.DecimalField(
-        max_digits=12, decimal_places=2, verbose_name="Montant")
+        max_digits=12, decimal_places=2, verbose_name="Montant HT")
     tax_amount = models.DecimalField(
         max_digits=10, decimal_places=2, default=0, verbose_name="TVA")
     total_amount = models.DecimalField(
-        max_digits=12, decimal_places=2, verbose_name="Total")
+        max_digits=12, decimal_places=2, verbose_name="Total TTC")
     amount_paid = models.DecimalField(
         max_digits=12, decimal_places=2, default=0, verbose_name="Montant payé")
+
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default='received', verbose_name="Statut")
     paiement_status = models.CharField(
         max_length=20, choices=PAIEMENT_STATUS_CHOICES, default='unpaid', verbose_name="Statut paiement")
     is_fully_paid = models.BooleanField(
         default=False, verbose_name="Entièrement payée")
+
     payment_date = models.DateField(
         null=True, blank=True, verbose_name="Date de paiement")
     payment_reference = models.CharField(
@@ -1082,9 +815,21 @@ class SupplierInvoice(models.Model):
     def __str__(self):
         return f"{self.invoice_number} - {self.supplier.name}"
 
+    def get_remaining_amount(self):
+        """✅ Montant restant à payer - METHODE"""
+        return self.total_amount - self.amount_paid
+
     @property
     def remaining_amount(self):
+        """✅ Montant restant à payer - PROPRIÉTÉ CALCULÉE"""
         return self.total_amount - self.amount_paid
+
+    @property
+    def paid_percentage(self):
+        """✅ Pourcentage payé"""
+        if self.total_amount == 0:
+            return 0
+        return (self.amount_paid / self.total_amount) * 100
 
     @property
     def is_overdue(self):
@@ -1097,42 +842,69 @@ class SupplierInvoice(models.Model):
         return 0
 
     def update_payment_status(self):
-        if self.amount_paid >= self.total_amount:
+        """✅ Met à jour le statut de paiement - CORRIGÉ"""
+        from .models import FournisseurPaiement
+
+        # ✅ Recalculer le montant payé à partir des paiements confirmés
+        total_paid = self.paiements.filter(status='confirmed').aggregate(
+            total=Sum('amount')
+        )['total'] or Decimal('0.00')
+
+        self.amount_paid = total_paid
+
+        # ✅ Calculer le reste
+        remaining = self.total_amount - self.amount_paid
+
+        if remaining <= 0:
             self.is_fully_paid = True
             self.paiement_status = 'paid'
             self.status = 'paid'
-            self.payment_date = timezone.now().date()
+            if not self.payment_date:
+                self.payment_date = timezone.now().date()
         elif self.amount_paid > 0:
             self.is_fully_paid = False
             self.paiement_status = 'partial'
             self.status = 'partial'
+            if not self.payment_date:
+                self.payment_date = timezone.now().date()
         else:
             self.is_fully_paid = False
             if self.is_overdue:
                 self.paiement_status = 'overdue'
+                self.status = 'received'
             else:
                 self.paiement_status = 'unpaid'
+                self.status = 'received'
 
+        # ✅ Mettre à jour la commande
         if self.purchase_order:
             self.purchase_order.update_invoice_status()
             self.purchase_order.update_payment_status()
 
-        self.save(update_fields=['is_fully_paid',
-                  'paiement_status', 'status', 'payment_date'])
+        # ✅ Sauvegarder
+        self.save(update_fields=[
+            'amount_paid',
+            'is_fully_paid',
+            'paiement_status',
+            'status',
+            'payment_date',
+            'updated_at'
+        ])
 
+    @classmethod
+    def get_available_for_payment(cls, supplier_id=None):
+        """✅ Récupère les factures disponibles pour paiement"""
+        queryset = cls.objects.filter(is_fully_paid=False)
+        if supplier_id:
+            queryset = queryset.filter(supplier_id=supplier_id)
+        return queryset.order_by('due_date')
 
 # ============================================================
-# PAIEMENT FOURNISSEUR (CORRIGÉ - SANS FK VERS TRESORERIE)
+# PAIEMENT FOURNISSEUR - CORRIGÉ
 # ============================================================
 
-
-# apps/achats_fournisseurs/models.py
-# Partie FournisseurPaiement - COMPLÈTEMENT CORRIGÉ
-# apps/achats_fournisseurs/models.py
-# FournisseurPaiement - COMPLET CORRIGÉ
 
 class FournisseurPaiement(models.Model):
-    """Paiement fournisseur"""
     METHOD_CHOICES = (
         ('especes', 'Espèces'),
         ('cheque', 'Chèque'),
@@ -1162,7 +934,6 @@ class FournisseurPaiement(models.Model):
     payment_date = models.DateTimeField(
         default=timezone.now, verbose_name="Date de paiement")
 
-    # ⚠️ UTILISATION D'IntegerField POUR ÉVITER LES IMPORTS CIRCULAIRES
     caisse_destination_id = models.IntegerField(
         null=True, blank=True, verbose_name="ID Caisse de décaissement")
     compte_destination_id = models.IntegerField(
@@ -1178,7 +949,6 @@ class FournisseurPaiement(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    # QR Code
     qr_code = models.ImageField(
         upload_to='qrcodes/fournisseur_paiements/', null=True, blank=True, verbose_name="QR Code")
     qr_code_data = models.TextField(blank=True, verbose_name="Données QR Code")
@@ -1211,17 +981,14 @@ class FournisseurPaiement(models.Model):
         self.qr_code.save(filename, File(buffer), save=False)
 
     def creer_mouvement_tresorerie(self, user):
-        """Crée le mouvement de trésorerie associé"""
         if self.mouvement_tresorerie_id:
             return self.mouvement_tresorerie_id
 
-        # Import différé pour éviter les imports circulaires
         try:
             from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
         except ImportError:
             return None
 
-        # Récupérer la caisse ou le compte
         caisse = None
         compte = None
 
@@ -1244,34 +1011,23 @@ class FournisseurPaiement(models.Model):
         if not caisse and not compte:
             return None
 
-        # ✅ Récupérer le warehouse
         warehouse = None
-
-        # 1. Essayer depuis les réceptions de la commande
         if self.purchase_order:
             receipt = self.purchase_order.receipts.first()
             if receipt:
                 warehouse = receipt.warehouse
 
-        # 2. Essayer depuis la facture
         if not warehouse and self.supplier_invoice and self.supplier_invoice.purchase_order:
             receipt = self.supplier_invoice.purchase_order.receipts.first()
             if receipt:
                 warehouse = receipt.warehouse
 
-        # 3. Essayer depuis la caisse
         if not warehouse and caisse:
             warehouse = caisse.warehouse
 
-        # 4. Dernier recours : prendre le premier warehouse disponible
-        if not warehouse:
-            from produits_stocks.models import Warehouse
-            warehouse = Warehouse.objects.filter(is_active=True).first()
-
-        # ✅ Créer le mouvement (warehouse peut être None)
         mouvement = MouvementTresorerie.objects.create(
             type_mouvement='decaissement',
-            warehouse=warehouse,  # Peut être None
+            warehouse=warehouse,
             source_type='paiement_fournisseur',
             source_id=self.id,
             source_reference=self.reference,
@@ -1285,6 +1041,10 @@ class FournisseurPaiement(models.Model):
             libelle=f"Paiement fournisseur - {self.supplier_invoice.invoice_number} - {self.supplier_invoice.supplier.name}",
             created_by=user
         )
+
+        if caisse:
+            caisse.solde_actuel -= self.amount
+            caisse.save(update_fields=['solde_actuel', 'updated_at'])
 
         self.mouvement_tresorerie_id = mouvement.id
         self.save(update_fields=['mouvement_tresorerie_id'])
