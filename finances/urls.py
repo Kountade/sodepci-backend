@@ -1,26 +1,33 @@
-# finances/urls.py
-
+# apps/finances/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from . import views
+from .views import (
+    CompteComptableViewSet,
+    EcritureComptableViewSet,
+    DepenseViewSet,
+    BudgetViewSet,
+    BudgetCategorieViewSet,
+    RapportFinancierViewSet,
+    ConfigurationFinanciereViewSet,
+    DashboardFinancierViewSet
+)
 
 router = DefaultRouter()
-router.register(r'comptes', views.CompteComptableViewSet, basename='comptes')
-router.register(r'ecritures', views.EcritureComptableViewSet,
-                basename='ecritures')
-router.register(r'tresorerie', views.TresorerieViewSet, basename='tresorerie')
-router.register(r'mouvements-tresorerie',
-                views.MouvementTresorerieViewSet, basename='mouvements-tresorerie')
-router.register(r'depenses', views.DepenseViewSet, basename='depenses')
-router.register(r'budgets', views.BudgetViewSet, basename='budgets')
-router.register(r'budget-categories',
-                views.BudgetCategorieViewSet, basename='budget-categories')
-router.register(r'rapports', views.RapportFinancierViewSet,
-                basename='rapports')
-router.register(r'configuration',
-                views.ConfigurationFinanciereViewSet, basename='configuration')
-router.register(r'stats', views.FinancesStatsViewSet,
-                basename='stats-finances')
+
+router.register('comptes-comptables', CompteComptableViewSet,
+                basename='comptes-comptables')
+router.register('ecritures-comptables', EcritureComptableViewSet,
+                basename='ecritures-comptables')
+router.register('depenses', DepenseViewSet, basename='depenses')
+router.register('budgets', BudgetViewSet, basename='budgets')
+router.register('budget-categories', BudgetCategorieViewSet,
+                basename='budget-categories')
+router.register('rapports-financiers', RapportFinancierViewSet,
+                basename='rapports-financiers')
+router.register('configuration-financiere',
+                ConfigurationFinanciereViewSet, basename='configuration-financiere')
+router.register('dashboard-financier', DashboardFinancierViewSet,
+                basename='dashboard-financier')
 
 urlpatterns = [
     path('', include(router.urls)),

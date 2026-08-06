@@ -1,32 +1,47 @@
-# tresorerie/signals.py
-
-import logging
-from django.db.models.signals import post_save, pre_save
+# apps/tresorerie/signals.py
+from django.db.models.signals import post_save
 from django.dispatch import receiver
-from django.db import models
-from django.utils import timezone
-from decimal import Decimal
-
-from ventes_clients.models import Vente, Facture, Paiement
-from .models import MouvementTresorerie, Caisse, Frais, TresorerieJournaliere
+from django.db import transaction
+import logging
 
 logger = logging.getLogger(__name__)
 
-print("🔔 SIGNALS FILE LOADED - tresorerie/signals.py")
+# ============================================================
+# SIGNALS POUR LA CRÉATION AUTOMATIQUE DE MOUVEMENTS
+# ============================================================
 
 
-@receiver(post_save, sender=Vente)
+@receiver(post_save, sender='ventes_clients.Vente')
 def creer_mouvement_vente(sender, instance, created, **kwargs):
-    print(
-        f"🔔 Signal Vente post_save : {instance.invoice_number}, status={instance.status}, warehouse={instance.warehouse}")
-    if instance.status == 'confirmed' and instance.warehouse:
-        if not instance.mouvements_tresorerie.exists():
+    """
+    Crée un mouvement de trésorerie automatiquement lors de la création d'une vente
+    """
+    # ✅ CORRECTION : Utiliser source_type et source_id au lieu de mouvements_tresorerie
+    try:
+        from .models import MouvementTresorerie, Caisse
+
+        # Vérifier si un mouvement existe déjà
+        existing_movement = MouvementTresorerie.objects.filter(
+            source_type='vente',
+            source_id=instance.id
+        ).first()
+
+        if existing_movement:
+            logger.info(
+                f"Mouvement déjà existant pour la vente {instance.invoice_number}")
+            return
+
+        # Vérifier si la vente est confirmée ou payée
+        if instance.status in ['confirmed', 'paid', 'delivered'] and instance.warehouse:
+            # Récupérer la caisse par défaut
             caisse = Caisse.objects.filter(
                 warehouse=instance.warehouse,
                 is_default=True
             ).first()
+
             if caisse:
-                MouvementTresorerie.objects.create(
+                # Créer le mouvement
+                mouvement = MouvementTresorerie.objects.create(
                     type_mouvement='encaissement',
                     warehouse=instance.warehouse,
                     source_type='vente',
@@ -39,153 +54,127 @@ def creer_mouvement_vente(sender, instance, created, **kwargs):
                     date_valeur=instance.sale_date.date(),
                     status='effectue',
                     libelle=f"Vente {instance.invoice_number} - {instance.client_name}",
-                    vente=instance,
                     created_by=instance.created_by
                 )
-                print(f"✅ Mouvement VENTE créé pour {instance.invoice_number}")
+
+                # Mettre à jour le solde de la caisse
+                caisse.solde_actuel += instance.total
+                caisse.save(update_fields=['solde_actuel', 'updated_at'])
+
+                logger.info(
+                    f"✅ Mouvement de trésorerie créé par signal pour la vente {instance.invoice_number}")
             else:
-                print(f"⚠️ Pas de caisse par défaut pour {instance.warehouse}")
+                logger.warning(
+                    f"Aucune caisse par défaut pour l'entrepôt {instance.warehouse}")
         else:
-            print(f"ℹ️ Mouvement déjà existant pour {instance.invoice_number}")
-    else:
-        print(f"ℹ️ Condition non remplie pour vente {instance.invoice_number}")
+            logger.info(
+                f"Vente {instance.invoice_number} non confirmée, pas de mouvement créé")
+
+    except Exception as e:
+        logger.error(f"❌ Erreur dans le signal creer_mouvement_vente: {e}")
 
 
-@receiver(post_save, sender=Paiement)
+@receiver(post_save, sender='ventes_clients.Paiement')
 def creer_mouvement_paiement(sender, instance, created, **kwargs):
-    print(
-        f"🔔 Signal Paiement post_save : paiement {instance.id}, created={created}, facture={instance.facture}")
-    if created and instance.facture and instance.facture.sale:
-        sale = instance.facture.sale
-        warehouse = sale.warehouse if sale else None
-        print(f"   Sale: {sale}, warehouse={warehouse}")
-        if warehouse:
-            # Utiliser les destinations choisies
-            caisse = instance.caisse_destination
-            compte = instance.compte_destination
+    """
+    Crée un mouvement de trésorerie automatiquement lors de la création d'un paiement
+    """
+    # ✅ CORRECTION : Utiliser source_type et source_id au lieu de mouvements_tresorerie
+    try:
+        from .models import MouvementTresorerie, Caisse, CompteBancaire
 
-            # Fallback : caisse par défaut
-            if not caisse and not compte:
-                caisse = Caisse.objects.filter(
-                    warehouse=warehouse, is_default=True
-                ).first()
-                if not caisse:
-                    print(
-                        f"⚠️ Pas de destination et pas de caisse par défaut pour entrepôt {warehouse}")
-                    return
+        if not created:
+            return
 
-            print(f"   Caisse choisie : {caisse}, Compte choisi : {compte}")
+        # Vérifier si un mouvement existe déjà
+        existing_movement = MouvementTresorerie.objects.filter(
+            source_type='paiement_client',
+            source_id=instance.id
+        ).first()
 
-            # Vérifier doublon
-            if instance.mouvements_tresorerie.exists():
-                print(
-                    f"ℹ️ Mouvement déjà existant pour paiement {instance.id}")
-                return
+        if existing_movement:
+            logger.info(
+                f"Mouvement déjà existant pour le paiement {instance.id}")
+            return
 
-            mouvement = MouvementTresorerie.objects.create(
-                type_mouvement='encaissement',
-                warehouse=warehouse,
-                source_type='paiement_client',
-                source_id=instance.id,
-                source_reference=instance.reference or f"PAY-{instance.id}",
-                montant=instance.amount,
-                mode_paiement=instance.method,
-                caisse=caisse,
-                compte_bancaire=compte,
-                date_mouvement=instance.payment_date,
-                date_valeur=instance.payment_date.date(),
-                status='effectue',
-                libelle=f"Paiement facture {instance.facture.invoice_number} - {instance.facture.client.name}",
-                facture_vente=instance.facture,
-                paiement=instance,
-                created_by=instance.received_by
-            )
-            print(
-                f"✅ Mouvement PAIEMENT créé pour paiement {instance.id} (réf. {mouvement.reference})")
-        else:
-            print(f"⚠️ Aucun entrepôt dans la vente associée")
-    else:
-        print(f"ℹ️ Condition non remplie pour paiement {instance.id}")
+        # Récupérer la facture et la vente
+        facture = instance.facture
+        if not facture:
+            logger.warning(f"Paiement {instance.id} sans facture")
+            return
 
+        sale = facture.sale
+        if not sale:
+            logger.warning(f"Paiement {instance.id} sans vente")
+            return
 
-@receiver(pre_save, sender=Frais)
-def creer_mouvement_frais(sender, instance, **kwargs):
-    if instance.status != 'paye':
-        return
-    if instance.mouvement:
+        if not sale.warehouse:
+            logger.warning(f"Paiement {instance.id} sans entrepôt")
+            return
+
+        # Récupérer la caisse ou le compte
+        caisse = None
+        compte = None
+
+        if instance.caisse_destination_id:
+            try:
+                caisse = Caisse.objects.get(id=instance.caisse_destination_id)
+            except Caisse.DoesNotExist:
+                pass
+
+        if instance.compte_destination_id:
+            try:
+                compte = CompteBancaire.objects.get(
+                    id=instance.compte_destination_id)
+            except CompteBancaire.DoesNotExist:
+                pass
+
+        # Si aucune destination, prendre la caisse par défaut
+        if not caisse and not compte:
+            caisse = Caisse.objects.filter(
+                warehouse=sale.warehouse,
+                is_default=True
+            ).first()
+
+        if not caisse and not compte:
+            logger.warning(
+                f"Aucune destination pour le paiement {instance.id}")
+            return
+
+        # Créer le mouvement
+        mouvement = MouvementTresorerie.objects.create(
+            type_mouvement='encaissement',
+            warehouse=sale.warehouse,
+            source_type='paiement_client',
+            source_id=instance.id,
+            source_reference=instance.reference or f"PAY-{instance.id}",
+            montant=instance.amount,
+            mode_paiement=instance.method,
+            caisse=caisse,
+            compte_bancaire=compte,
+            date_mouvement=instance.payment_date,
+            date_valeur=instance.payment_date.date(),
+            status='effectue',
+            libelle=f"Paiement vente {sale.invoice_number} - {sale.client_name}",
+            created_by=instance.received_by
+        )
+
+        # Mettre à jour le solde de la caisse
+        if caisse:
+            caisse.solde_actuel += instance.amount
+            caisse.save(update_fields=['solde_actuel', 'updated_at'])
+            logger.info(
+                f"💰 Caisse {caisse.nom} augmentée de {instance.amount:,.0f} FCFA")
+
+        # Mettre à jour le solde du compte
+        if compte:
+            compte.solde_actuel += instance.amount
+            compte.save(update_fields=['solde_actuel', 'updated_at'])
+            logger.info(
+                f"💰 Compte {compte.nom} augmenté de {instance.amount:,.0f} FCFA")
+
         logger.info(
-            f"Le frais {instance.reference} a déjà un mouvement associé.")
-        return
-    if not instance.warehouse:
-        logger.warning(
-            f"Frais {instance.reference} sans entrepôt, impossible de créer un mouvement.")
-        return
+            f"✅ Mouvement de trésorerie créé par signal pour le paiement {instance.id}")
 
-    caisse = Caisse.objects.filter(
-        warehouse=instance.warehouse,
-        is_default=True
-    ).first()
-
-    if not caisse:
-        logger.error(
-            f"Aucune caisse par défaut pour l'entrepôt {instance.warehouse}. Mouvement non créé.")
-        return
-
-    mouvement = MouvementTresorerie.objects.create(
-        type_mouvement='decaissement',
-        warehouse=instance.warehouse,
-        source_type='frais',
-        source_id=instance.id,
-        source_reference=instance.reference,
-        montant=instance.montant,
-        mode_paiement=instance.mode_paiement,
-        caisse=caisse,
-        date_mouvement=timezone.now(),
-        date_valeur=instance.date_paiement or timezone.now().date(),
-        status='effectue',
-        libelle=f"Frais: {instance.titre}",
-        created_by=instance.created_by
-    )
-    mouvement._mettre_a_jour_soldes()
-    mouvement.save()
-    instance.mouvement = mouvement
-    logger.info(
-        f"Mouvement {mouvement.reference} créé pour le frais {instance.reference}.")
-
-
-@receiver(post_save, sender=MouvementTresorerie)
-def mettre_a_jour_tresorerie_journaliere(sender, instance, **kwargs):
-    if instance.status == 'effectue':
-        try:
-            jour = TresorerieJournaliere.objects.get(
-                date=instance.date_mouvement.date(),
-                warehouse=instance.warehouse
-            )
-        except TresorerieJournaliere.DoesNotExist:
-            jour = TresorerieJournaliere.objects.create(
-                date=instance.date_mouvement.date(),
-                warehouse=instance.warehouse
-            )
-
-        jour.total_entrees = MouvementTresorerie.objects.filter(
-            warehouse=instance.warehouse,
-            date_mouvement__date=instance.date_mouvement.date(),
-            status='effectue',
-            type_mouvement='encaissement'
-        ).aggregate(total=models.Sum('montant'))['total'] or 0
-
-        jour.total_sorties = MouvementTresorerie.objects.filter(
-            warehouse=instance.warehouse,
-            date_mouvement__date=instance.date_mouvement.date(),
-            status='effectue',
-            type_mouvement='decaissement'
-        ).aggregate(total=models.Sum('montant'))['total'] or 0
-
-        if jour.solde_ouverture == 0:
-            jour.solde_ouverture = Caisse.objects.filter(
-                warehouse=instance.warehouse
-            ).aggregate(total=models.Sum('solde_actuel'))['total'] or 0
-
-        jour.solde_fermeture = jour.solde_ouverture + \
-            jour.total_entrees - jour.total_sorties
-        jour.save()
+    except Exception as e:
+        logger.error(f"❌ Erreur dans le signal creer_mouvement_paiement: {e}")

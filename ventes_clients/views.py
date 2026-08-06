@@ -56,6 +56,11 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # FONCTION UTILITAIRE POUR CRÉER UN MOUVEMENT DE PAIEMENT
 # ============================================================
+# apps/ventes_clients/views.py
+# ============================================================
+# FONCTION UTILITAIRE POUR CRÉER UN MOUVEMENT DE PAIEMENT - VERSION CORRIGÉE
+# ============================================================
+
 def creer_mouvement_paiement_manuel(paiement, facture, request_user):
     """
     Crée un mouvement de trésorerie pour un paiement.
@@ -78,25 +83,67 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
             f"❌ Paiement {paiement.id} : la vente {sale.invoice_number} n'a pas d'entrepôt")
         return None
 
-    # Vérifier si un mouvement existe déjà pour ce paiement
-    if paiement.mouvements_tresorerie.exists():
-        mouvement_existant = paiement.mouvements_tresorerie.first()
-        logger.info(
-            f"ℹ️ Paiement {paiement.id} : mouvement déjà existant ({mouvement_existant.reference})")
-        return mouvement_existant
-
-    # Chercher la caisse par défaut de l'entrepôt
-    caisse = Caisse.objects.filter(
-        warehouse=sale.warehouse, is_default=True).first()
-    if not caisse:
-        logger.warning(
-            f"❌ Paiement {paiement.id} : aucune caisse par défaut pour l'entrepôt {sale.warehouse}")
-        return None
-
-    logger.info(f"✅ Caisse par défaut trouvée : {caisse.nom} (ID {caisse.id})")
-
-    # Créer le mouvement
     try:
+        from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
+        
+        # ✅ VÉRIFIER SI UN MOUVEMENT EXISTE DÉJÀ (sans utiliser mouvements_tresorerie)
+        existing_movement = MouvementTresorerie.objects.filter(
+            source_type='paiement_client',
+            source_id=paiement.id
+        ).first()
+        
+        if existing_movement:
+            logger.info(
+                f"ℹ️ Paiement {paiement.id} : mouvement déjà existant ({existing_movement.reference})")
+            return existing_movement
+
+        # Récupérer la caisse ou le compte de destination
+        caisse = None
+        compte = None
+        
+        # Vérifier si le paiement a une caisse de destination
+        if hasattr(paiement, 'caisse_destination_id') and paiement.caisse_destination_id:
+            try:
+                caisse = Caisse.objects.get(id=paiement.caisse_destination_id)
+                logger.info(f"✅ Caisse trouvée : {caisse.nom}")
+            except Caisse.DoesNotExist:
+                logger.warning(f"⚠️ Caisse ID {paiement.caisse_destination_id} non trouvée")
+                
+        # Vérifier si le paiement a un compte de destination
+        if hasattr(paiement, 'compte_destination_id') and paiement.compte_destination_id:
+            try:
+                compte = CompteBancaire.objects.get(id=paiement.compte_destination_id)
+                logger.info(f"✅ Compte trouvé : {compte.nom}")
+            except CompteBancaire.DoesNotExist:
+                logger.warning(f"⚠️ Compte ID {paiement.compte_destination_id} non trouvé")
+
+        # Si aucune destination spécifiée, prendre la caisse par défaut de l'entrepôt
+        if not caisse and not compte:
+            logger.info("ℹ️ Aucune destination spécifiée, recherche de la caisse par défaut...")
+            caisse = Caisse.objects.filter(
+                warehouse=sale.warehouse, 
+                is_default=True
+            ).first()
+            
+            if caisse:
+                logger.info(f"✅ Caisse par défaut trouvée : {caisse.nom}")
+            else:
+                # Si pas de caisse par défaut, prendre la première caisse active
+                caisse = Caisse.objects.filter(
+                    warehouse=sale.warehouse,
+                    is_active=True
+                ).first()
+                if caisse:
+                    logger.info(f"✅ Caisse active trouvée : {caisse.nom}")
+            
+        if not caisse and not compte:
+            logger.warning(
+                f"❌ Paiement {paiement.id} : aucune caisse ou compte disponible pour l'entrepôt {sale.warehouse}")
+            return None
+
+        logger.info(f"✅ Destination finale : {caisse.nom if caisse else compte.nom}")
+
+        # Créer le mouvement d'encaissement
         mouvement = MouvementTresorerie.objects.create(
             type_mouvement='encaissement',
             warehouse=sale.warehouse,
@@ -106,23 +153,39 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
             montant=paiement.amount,
             mode_paiement=paiement.method,
             caisse=caisse,
+            compte_bancaire=compte,
             date_mouvement=paiement.payment_date,
             date_valeur=paiement.payment_date.date(),
             status='effectue',
-            libelle=f"Paiement facture {facture.invoice_number} - {facture.client.name}",
-            facture_vente=facture,
-            paiement=paiement,
+            libelle=f"Paiement client - {facture.invoice_number} - {facture.client.name}",
             created_by=request_user
         )
+        
+        # ✅ Mettre à jour le solde de la caisse (augmentation)
+        if caisse:
+            caisse.solde_actuel += paiement.amount
+            caisse.save(update_fields=['solde_actuel', 'updated_at'])
+            logger.info(f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
+            
+        # ✅ Mettre à jour le solde du compte bancaire (augmentation)
+        if compte:
+            compte.solde_actuel += paiement.amount
+            compte.save(update_fields=['solde_actuel', 'updated_at'])
+            logger.info(f"💰 Compte {compte.nom} augmenté de {paiement.amount:,.0f} FCFA")
+
         logger.info(
-            f"✅ Mouvement créé pour paiement {paiement.id} : {mouvement.reference}")
+            f"✅ Mouvement d'encaissement créé pour paiement {paiement.id} : {mouvement.reference}")
         return mouvement
+        
+    except ImportError as e:
+        logger.error(f"❌ Erreur d'importation du module trésorerie: {e}")
+        return None
     except Exception as e:
         logger.error(
             f"❌ Erreur lors de la création du mouvement pour paiement {paiement.id} : {e}")
+        import traceback
+        traceback.print_exc()
         return None
-
-
 # ============================================================
 # CLIENT VIEWSET
 # ============================================================
@@ -314,6 +377,15 @@ class DevisViewSet(viewsets.ModelViewSet):
 # ============================================================
 # VENTE VIEWSET
 # ============================================================
+# apps/ventes_clients/views.py
+# ============================================================
+# VENTE VIEWSET - COMPLET AVEC TOUTES LES FONCTIONNALITÉS
+# ============================================================
+
+# apps/ventes_clients/views.py
+# ============================================================
+# VENTE VIEWSET - COMPLET AVEC TOUTES LES FONCTIONNALITÉS
+# ============================================================
 
 class VenteViewSet(viewsets.ModelViewSet):
     queryset = Vente.objects.all()
@@ -373,11 +445,17 @@ class VenteViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    # ================================================================
+    # 1. CONFIRMER UNE VENTE
+    # ================================================================
     @action(detail=True, methods=['post'])
     def confirm(self, request, pk=None):
         """
-        Confirme une vente : déduit le stock, crée le mouvement de trésorerie
-        et génère la facture.
+        Confirme une vente :
+        1. Vérifie le stock
+        2. Déduit le stock
+        3. Crée un mouvement de trésorerie (encaissement)
+        4. Génère la facture automatiquement
         """
         vente = self.get_object()
 
@@ -416,166 +494,361 @@ class VenteViewSet(viewsets.ModelViewSet):
                 vente.client_name = "Client anonyme"
                 vente.save(update_fields=['client_name'])
 
-            # 3. Passer la vente en 'confirmed' – cela déclenche le signal normalement
+            # 3. Passer la vente en 'confirmed'
             vente.status = 'confirmed'
             vente.save()
 
-            # 4. CRÉATION MANUELLE DU MOUVEMENT DE TRÉSORERIE
-            caisse = Caisse.objects.filter(
-                warehouse=vente.warehouse,
-                is_default=True
-            ).first()
-
-            if not caisse:
-                logger.warning(
-                    f"Aucune caisse par défaut pour l'entrepôt {vente.warehouse}")
-            else:
-                if not vente.mouvements_tresorerie.exists():
-                    MouvementTresorerie.objects.create(
-                        type_mouvement='encaissement',
+            # 4. CRÉATION DU MOUVEMENT DE TRÉSORERIE (ENCAISSEMENT)
+            try:
+                from tresorerie.models import MouvementTresorerie, Caisse
+                
+                # Vérifier si un mouvement existe déjà
+                existing_movement = MouvementTresorerie.objects.filter(
+                    source_type='vente',
+                    source_id=vente.id
+                ).first()
+                
+                if not existing_movement:
+                    caisse = Caisse.objects.filter(
                         warehouse=vente.warehouse,
-                        source_type='vente',
-                        source_id=vente.id,
-                        source_reference=vente.invoice_number,
-                        montant=vente.total,
-                        mode_paiement='especes',
-                        caisse=caisse,
-                        date_mouvement=vente.sale_date,
-                        date_valeur=vente.sale_date.date(),
-                        status='effectue',
-                        libelle=f"Vente {vente.invoice_number} - {vente.client_name}",
-                        vente=vente,
-                        created_by=request.user
-                    )
-                    logger.info(
-                        f"Mouvement de trésorerie créé pour la vente {vente.invoice_number}")
+                        is_default=True
+                    ).first()
+
+                    if caisse:
+                        mouvement = MouvementTresorerie.objects.create(
+                            type_mouvement='encaissement',
+                            warehouse=vente.warehouse,
+                            source_type='vente',
+                            source_id=vente.id,
+                            source_reference=vente.invoice_number,
+                            montant=vente.total,
+                            mode_paiement='especes',
+                            caisse=caisse,
+                            date_mouvement=vente.sale_date,
+                            date_valeur=vente.sale_date.date(),
+                            status='effectue',
+                            libelle=f"Vente {vente.invoice_number} - {vente.client_name}",
+                            created_by=request.user
+                        )
+                        
+                        # ✅ Augmenter la caisse
+                        caisse.solde_actuel += vente.total
+                        caisse.save(update_fields=['solde_actuel', 'updated_at'])
+                        
+                        logger.info(f"✅ Mouvement d'encaissement créé pour la vente {vente.invoice_number}")
+                        logger.info(f"💰 Caisse {caisse.nom} augmentée de {vente.total:,.0f} FCFA")
+                    else:
+                        logger.warning(f"Aucune caisse par défaut pour l'entrepôt {vente.warehouse}")
                 else:
-                    logger.info(
-                        f"Mouvement déjà existant pour la vente {vente.invoice_number}")
+                    logger.info(f"Mouvement déjà existant pour la vente {vente.invoice_number}")
+                    
+            except ImportError:
+                logger.warning("Module tresorerie non disponible")
+            except Exception as e:
+                logger.error(f"Erreur création mouvement trésorerie: {e}")
 
             # 5. Génération de la facture (si elle n'existe pas déjà)
             facture = Facture.objects.filter(sale=vente).first()
             if not facture:
-                pass
+                from datetime import date
+                from .models import Facture
+                
+                last_facture = Facture.objects.order_by('-id').first()
+                num = 1
+                if last_facture and last_facture.invoice_number:
+                    try:
+                        num = int(last_facture.invoice_number.split('-')[-1]) + 1
+                    except (ValueError, IndexError):
+                        num = 1
+                invoice_number = f"FAC-{date.today().year}-{num:04d}"
+                
+                facture = Facture.objects.create(
+                    invoice_number=invoice_number,
+                    sale=vente,
+                    client=vente.client,
+                    invoice_date=date.today(),
+                    due_date=date.today() + timedelta(days=30),
+                    subtotal=vente.subtotal,
+                    tax_amount=vente.tax_amount,
+                    total=vente.total,
+                    status='sent',
+                    notes=f"Facture générée automatiquement depuis la vente {vente.invoice_number}"
+                )
+                facture.generate_qr_code()
+                facture.save()
 
             return Response({
                 'status': vente.status,
                 'message': 'Vente confirmée avec succès',
                 'invoice_number': vente.invoice_number,
                 'facture_generée': facture is not None,
-                'facture_number': facture.invoice_number if facture else None
+                'facture_number': facture.invoice_number if facture else None,
+                'mouvement_cree': mouvement is not None if 'mouvement' in locals() else False
             })
 
-        except ValueError as e:
-            vente.status = 'draft'
-            vente.save(update_fields=['status'])
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         except Exception as e:
+            vente.status = 'draft'
+            vente.save(update_fields=['status', 'updated_at'])
             logger.exception("Erreur lors de la confirmation de la vente")
             return Response(
                 {"error": f"Erreur lors de la confirmation: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    # ================================================================
+    # 2. ENREGISTRER UN PAIEMENT SUR UNE VENTE
+    # ================================================================
+    @action(detail=True, methods=['post'])
+    def register_payment(self, request, pk=None):
+        """
+        Enregistre un paiement sur une vente
+        """
+        from decimal import Decimal
+        from django.db import transaction
+        from django.db.models import Sum
+
+        vente = self.get_object()
+        logger.info(f"🔔 register_payment - vente {vente.invoice_number}")
+
+        amount = request.data.get('amount')
+        method = request.data.get('method', 'cash')
+        reference = request.data.get('reference', '')
+        notes = request.data.get('notes', '')
+        caisse_destination_id = request.data.get('caisse_destination_id')
+        compte_destination_id = request.data.get('compte_destination_id')
+
+        try:
+            amount = Decimal(str(amount))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "Le montant doit être un nombre valide"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if amount <= 0:
+            return Response(
+                {"error": "Le montant doit être supérieur à 0"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Calculer le montant dû
+        amount_due = vente.total - vente.amount_paid
+        if amount > amount_due:
+            return Response(
+                {"error": f"Le montant dépasse le solde restant ({amount_due:,.0f} FCFA)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            # Récupérer la facture de la vente
+            facture = vente.invoices.first()
+            if not facture:
+                return Response(
+                    {"error": "Aucune facture trouvée pour cette vente"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Créer le paiement
+            paiement = Paiement.objects.create(
+                facture=facture,
+                amount=amount,
+                method=method,
+                reference=reference,
+                notes=notes or f"Paiement sur la vente {vente.invoice_number}",
+                received_by=request.user,
+                caisse_destination_id=caisse_destination_id,
+                compte_destination_id=compte_destination_id
+            )
+            logger.info(f"✅ Paiement créé : ID {paiement.id}")
+
+            # Mettre à jour la facture
+            total_paid_facture = facture.paiements.aggregate(
+                total=Sum('amount')
+            )['total'] or Decimal('0')
+            facture.amount_paid = total_paid_facture
+            if facture.amount_paid >= facture.total:
+                facture.status = 'paid'
+            elif facture.amount_paid > 0:
+                facture.status = 'partial'
+            facture.save()
+
+            # Mettre à jour la vente
+            vente.amount_paid += amount
+            vente.amount_due = vente.total - vente.amount_paid
+            if vente.amount_due <= 0:
+                vente.payment_status = 'paid'
+                vente.status = 'paid'
+            elif vente.amount_paid > 0:
+                vente.payment_status = 'partial'
+            else:
+                vente.payment_status = 'pending'
+            vente.save()
+
+            # CRÉER LE MOUVEMENT DE TRÉSORERIE (ENCAISSEMENT)
+            try:
+                from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
+
+                # Récupérer la caisse ou le compte
+                caisse = None
+                compte = None
+
+                if caisse_destination_id:
+                    try:
+                        caisse = Caisse.objects.get(id=caisse_destination_id)
+                    except Caisse.DoesNotExist:
+                        pass
+
+                if compte_destination_id:
+                    try:
+                        compte = CompteBancaire.objects.get(id=compte_destination_id)
+                    except CompteBancaire.DoesNotExist:
+                        pass
+
+                # Si aucune destination spécifiée, prendre la caisse par défaut
+                if not caisse and not compte:
+                    caisse = Caisse.objects.filter(
+                        warehouse=vente.warehouse,
+                        is_default=True
+                    ).first()
+
+                if caisse or compte:
+                    # Vérifier si un mouvement existe déjà
+                    existing_movement = MouvementTresorerie.objects.filter(
+                        source_type='paiement_client',
+                        source_id=paiement.id
+                    ).first()
+
+                    if not existing_movement:
+                        mouvement = MouvementTresorerie.objects.create(
+                            type_mouvement='encaissement',
+                            warehouse=vente.warehouse,
+                            source_type='paiement_client',
+                            source_id=paiement.id,
+                            source_reference=paiement.reference or f"PAY-{paiement.id}",
+                            montant=paiement.amount,
+                            mode_paiement=paiement.method,
+                            caisse=caisse,
+                            compte_bancaire=compte,
+                            date_mouvement=paiement.payment_date,
+                            date_valeur=paiement.payment_date.date(),
+                            status='effectue',
+                            libelle=f"Paiement vente {vente.invoice_number} - {vente.client_name}",
+                            created_by=request.user
+                        )
+                        
+                        # Mettre à jour le solde
+                        if caisse:
+                            caisse.solde_actuel += paiement.amount
+                            caisse.save(update_fields=['solde_actuel', 'updated_at'])
+                            logger.info(f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
+                            
+                        if compte:
+                            compte.solde_actuel += paiement.amount
+                            compte.save(update_fields=['solde_actuel', 'updated_at'])
+                            logger.info(f"💰 Compte {compte.nom} augmenté de {paiement.amount:,.0f} FCFA")
+                        
+                        logger.info(f"✅ Mouvement d'encaissement créé pour le paiement {paiement.id}")
+                    else:
+                        logger.info(f"Mouvement déjà existant pour le paiement {paiement.id}")
+                else:
+                    logger.warning(f"Aucune destination pour le paiement {paiement.id}")
+                    
+            except ImportError:
+                logger.warning("Module tresorerie non disponible")
+            except Exception as e:
+                logger.error(f"Erreur création mouvement: {e}")
+
+        return Response({
+            'status': 'success',
+            'message': 'Paiement enregistré avec succès',
+            'amount_paid': vente.amount_paid,
+            'amount_due': vente.amount_due,
+            'payment_status': vente.payment_status
+        }, status=status.HTTP_201_CREATED)
+
+    # ================================================================
+    # 3. MISE À JOUR DU STATUT
+    # ================================================================
     @action(detail=True, methods=['post'])
     def update_status(self, request, pk=None):
         vente = self.get_object()
         status_value = request.data.get('status')
         notes = request.data.get('notes', '')
+        
         if not status_value:
             return Response(
                 {"error": "Le statut est requis"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        allowed_statuses = ['draft', 'confirmed',
-                            'paid', 'delivered', 'cancelled', 'returned']
+        
+        allowed_statuses = ['draft', 'confirmed', 'paid', 'delivered', 'cancelled', 'returned']
         if status_value not in allowed_statuses:
             return Response(
                 {"error": f"Statut invalide. Choisir parmi: {', '.join(allowed_statuses)}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        
         old_status = vente.status
         is_confirming = old_status == 'draft' and status_value == 'confirmed'
+        
         if is_confirming:
-            if not vente.warehouse:
-                return Response(
-                    {"error": "Un entrepôt est requis pour confirmer la vente"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            stock_errors = []
-            for line in vente.lines.all():
-                stock = Stock.objects.filter(
-                    product=line.product,
-                    warehouse=vente.warehouse
-                ).first()
-                if not stock or stock.available_quantity < line.quantity:
-                    stock_errors.append(
-                        f"{line.product.name}: disponible {stock.available_quantity if stock else 0}, demandé {line.quantity}"
-                    )
-            if stock_errors:
-                return Response({
-                    "error": "Stock insuffisant pour les produits suivants:",
-                    "details": stock_errors
-                }, status=status.HTTP_400_BAD_REQUEST)
+            return self.confirm(request, pk)
+        
         try:
-            if not vente.client and not vente.client_name:
-                vente.client_name = "Client anonyme"
-                vente.save(update_fields=['client_name'])
             vente.status = status_value
             if notes:
                 vente.notes = vente.notes + '\n' + notes if vente.notes else notes
             vente.save()
-            facture_generée = Facture.objects.filter(sale=vente).exists()
-            facture = Facture.objects.filter(
-                sale=vente).first() if facture_generée else None
+            
             return Response({
                 'status': vente.status,
                 'old_status': old_status,
                 'message': f'Statut changé de {old_status} à {status_value}',
-                'facture_generée': facture_generée,
-                'facture_number': facture.invoice_number if facture else None,
                 'invoice_number': vente.invoice_number
             })
-        except ValueError as e:
-            if is_confirming:
-                vente.status = 'draft'
-                vente.save(update_fields=['status'])
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            return Response({"error": f"Erreur inattendue: {str(e)}"},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {"error": f"Erreur lors du changement de statut: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
+    # ================================================================
+    # 4. MARQUER COMME PAYÉ
+    # ================================================================
     @action(detail=True, methods=['post'])
     def mark_paid(self, request, pk=None):
         vente = self.get_object()
+        
         if vente.status not in ['confirmed', 'delivered']:
             return Response(
                 {"error": "Seule une vente confirmée ou livrée peut être marquée comme payée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        vente.status = 'paid'
-        vente.payment_status = 'paid'
-        vente.amount_paid = vente.total
-        vente.amount_due = 0
-        vente.save()
-        return Response({
-            'status': vente.status,
-            'payment_status': vente.payment_status,
-            'message': 'Vente marquée comme payée',
-            'invoice_number': vente.invoice_number
-        })
+        
+        # Créer un paiement automatique
+        amount_due = vente.amount_due
+        if amount_due <= 0:
+            return Response(
+                {"error": "Cette vente est déjà entièrement payée"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Enregistrer le paiement
+        return self.register_payment(request, pk)
 
+    # ================================================================
+    # 5. ANNULER UNE VENTE
+    # ================================================================
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         vente = self.get_object()
+        
         if vente.status in ['paid', 'delivered']:
             return Response(
                 {"error": "Cette vente ne peut pas être annulée car elle est déjà payée ou livrée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        
         try:
             old_status = vente.status
             if old_status == 'confirmed':
@@ -583,30 +856,41 @@ class VenteViewSet(viewsets.ModelViewSet):
             vente.status = 'cancelled'
             vente.save()
             vente.generate_qr_code()
-            vente.save(update_fields=['qr_code', 'qr_code_data'])
+            vente.save(update_fields=['qr_code', 'qr_code_data', 'updated_at'])
+            
             return Response({
                 'status': vente.status,
                 'old_status': old_status,
                 'message': 'Vente annulée avec succès',
-                'stock_restored': old_status == 'confirmed'
+                'stock_restored': old_status == 'confirmed',
+                'invoice_number': vente.invoice_number
             })
         except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
+    # ================================================================
+    # 6. MARQUER COMME LIVRÉ
+    # ================================================================
     @action(detail=True, methods=['post'])
     def deliver(self, request, pk=None):
         vente = self.get_object()
+        
         if vente.status != 'confirmed':
             return Response(
                 {"error": "Seule une vente confirmée peut être marquée comme livrée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        
         vente.status = 'delivered'
         vente.delivery_date = timezone.now()
         vente.delivery_status = 'delivered'
         if request.data.get('tracking_number'):
             vente.tracking_number = request.data.get('tracking_number')
         vente.save()
+        
         return Response({
             'status': vente.status,
             'delivery_status': vente.delivery_status,
@@ -615,18 +899,24 @@ class VenteViewSet(viewsets.ModelViewSet):
             'invoice_number': vente.invoice_number
         })
 
+    # ================================================================
+    # 7. RETOURNER UNE VENTE
+    # ================================================================
     @action(detail=True, methods=['post'])
     def return_sale(self, request, pk=None):
         vente = self.get_object()
+        
         if vente.status not in ['delivered', 'paid']:
             return Response(
                 {"error": "Seules les ventes livrées ou payées peuvent être retournées"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        
         try:
             vente.restore_stock()
             vente.status = 'returned'
             vente.save()
+            
             return Response({
                 'status': vente.status,
                 'message': 'Vente retournée avec succès',
@@ -634,8 +924,14 @@ class VenteViewSet(viewsets.ModelViewSet):
                 'invoice_number': vente.invoice_number
             })
         except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
+    # ================================================================
+    # 8. RÉCUPÉRER LES PAIEMENTS
+    # ================================================================
     @action(detail=True, methods=['get'])
     def payments(self, request, pk=None):
         vente = self.get_object()
@@ -644,17 +940,25 @@ class VenteViewSet(viewsets.ModelViewSet):
             for paiement in facture.paiements.all():
                 payments.append(paiement)
         serializer = PaiementSerializer(
-            payments, many=True, context={'request': request})
+            payments, many=True, context={'request': request}
+        )
         return Response(serializer.data)
 
+    # ================================================================
+    # 9. RÉCUPÉRER LES FACTURES
+    # ================================================================
     @action(detail=True, methods=['get'])
     def invoices(self, request, pk=None):
         vente = self.get_object()
         factures = vente.invoices.all()
         serializer = FactureSerializer(
-            factures, many=True, context={'request': request})
+            factures, many=True, context={'request': request}
+        )
         return Response(serializer.data)
 
+    # ================================================================
+    # 10. GÉNÉRER LE QR CODE
+    # ================================================================
     @action(detail=True, methods=['get'])
     def generate_qr(self, request, pk=None):
         vente = self.get_object()
@@ -672,6 +976,9 @@ class VenteViewSet(viewsets.ModelViewSet):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+    # ================================================================
+    # 11. RÉCUPÉRER LES MOUVEMENTS DE STOCK
+    # ================================================================
     @action(detail=True, methods=['get'])
     def stock_movements(self, request, pk=None):
         vente = self.get_object()
@@ -683,28 +990,36 @@ class VenteViewSet(viewsets.ModelViewSet):
         serializer = StockMovementSerializer(movements, many=True)
         return Response(serializer.data)
 
+    # ================================================================
+    # 12. STATISTIQUES
+    # ================================================================
     @action(detail=False, methods=['get'])
     def stats(self, request):
         days = int(request.query_params.get('days', 30))
         start_date = timezone.now() - timedelta(days=days)
         ventes = Vente.objects.filter(sale_date__gte=start_date)
+        
         total_ventes = ventes.count()
         total_montant = ventes.aggregate(total=Sum('total'))['total'] or 0
         total_paye = ventes.aggregate(total=Sum('amount_paid'))['total'] or 0
         total_due = total_montant - total_paye
+        
         by_status = {}
         for status_choice in Vente.STATUS_CHOICES:
             status_code = status_choice[0]
             count = ventes.filter(status=status_code).count()
             if count > 0:
                 by_status[status_code] = count
+        
         by_payment_status = {}
         for status_choice in Vente.PAYMENT_STATUS_CHOICES:
             status_code = status_choice[0]
             count = ventes.filter(payment_status=status_code).count()
             if count > 0:
                 by_payment_status[status_code] = count
+        
         avg_amount = total_montant / total_ventes if total_ventes > 0 else 0
+        
         return Response({
             'period': {
                 'days': days,
@@ -719,11 +1034,10 @@ class VenteViewSet(viewsets.ModelViewSet):
             'by_status': by_status,
             'by_payment_status': by_payment_status
         })
-
-
 # ============================================================
 # FACTURE VIEWSET
 # ============================================================
+
 
 class FactureViewSet(viewsets.ModelViewSet):
     queryset = Facture.objects.all()
