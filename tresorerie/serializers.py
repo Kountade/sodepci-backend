@@ -30,7 +30,8 @@ class CaisseSerializer(serializers.ModelSerializer):
             'est_sous_seuil_min', 'est_sur_seuil_max', 'total_mouvements',
             'created_at', 'updated_at', 'created_by'
         ]
-        read_only_fields = ['solde_actuel', 'created_at', 'updated_at', 'created_by']
+        read_only_fields = ['solde_actuel',
+                            'created_at', 'updated_at', 'created_by']
 
     def get_solde_actuel_formate(self, obj):
         return f"{obj.solde_actuel:,.0f} FCFA"
@@ -66,7 +67,8 @@ class CompteBancaireSerializer(serializers.ModelSerializer):
             'is_active', 'is_default', 'date_ouverture', 'description',
             'created_at', 'updated_at', 'created_by'
         ]
-        read_only_fields = ['solde_actuel', 'created_at', 'updated_at', 'created_by']
+        read_only_fields = ['solde_actuel',
+                            'created_at', 'updated_at', 'created_by']
 
     def get_solde_actuel_formate(self, obj):
         return f"{obj.solde_actuel:,.0f} FCFA"
@@ -84,13 +86,17 @@ class MouvementTresorerieSerializer(serializers.ModelSerializer):
     est_decaissement = serializers.BooleanField(read_only=True)
     est_transfert = serializers.BooleanField(read_only=True)
     montant_formate = serializers.SerializerMethodField()
-    caisse_nom = serializers.CharField(source='caisse.nom', read_only=True, allow_null=True)
+    caisse_nom = serializers.CharField(
+        source='caisse.nom', read_only=True, allow_null=True)
     compte_bancaire_nom = serializers.CharField(
         source='compte_bancaire.nom', read_only=True, allow_null=True
     )
-    warehouse_nom = serializers.CharField(source='warehouse.name', read_only=True, allow_null=True)
-    created_by_name = serializers.CharField(source='created_by.full_name', read_only=True, allow_null=True)
-    valide_par_name = serializers.CharField(source='valide_par.full_name', read_only=True, allow_null=True)
+    warehouse_nom = serializers.CharField(
+        source='warehouse.name', read_only=True, allow_null=True)
+    created_by_name = serializers.CharField(
+        source='created_by.full_name', read_only=True, allow_null=True)
+    valide_par_name = serializers.CharField(
+        source='valide_par.full_name', read_only=True, allow_null=True)
 
     class Meta:
         model = MouvementTresorerie
@@ -146,10 +152,12 @@ class MouvementTresorerieSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         # Si on passe le statut à 'effectué', on met à jour les soldes
         if validated_data.get('status') == 'effectue' and instance.status != 'effectue':
-            instance.type_mouvement = validated_data.get('type_mouvement', instance.type_mouvement)
+            instance.type_mouvement = validated_data.get(
+                'type_mouvement', instance.type_mouvement)
             instance.montant = validated_data.get('montant', instance.montant)
             instance.caisse = validated_data.get('caisse', instance.caisse)
-            instance.compte_bancaire = validated_data.get('compte_bancaire', instance.compte_bancaire)
+            instance.compte_bancaire = validated_data.get(
+                'compte_bancaire', instance.compte_bancaire)
             instance._mettre_a_jour_soldes()
 
         return super().update(instance, validated_data)
@@ -186,12 +194,20 @@ class MouvementTresorerieCreateSerializer(serializers.ModelSerializer):
 # ----------------------------------------------
 # 5. FRAIS
 # ----------------------------------------------
+# apps/tresorerie/serializers.py
+# Modifier FraisSerializer
+
 class FraisSerializer(serializers.ModelSerializer):
     montant_formate = serializers.SerializerMethodField()
-    warehouse_nom = serializers.CharField(source='warehouse.name', read_only=True, allow_null=True)
-    created_by_name = serializers.CharField(source='created_by.full_name', read_only=True, allow_null=True)
-    valide_par_name = serializers.CharField(source='valide_par.full_name', read_only=True, allow_null=True)
-    mouvement_reference = serializers.CharField(source='mouvement.reference', read_only=True, allow_null=True)
+    warehouse_nom = serializers.CharField(
+        source='warehouse.name', read_only=True, allow_null=True)
+    created_by_name = serializers.CharField(
+        source='created_by.full_name', read_only=True, allow_null=True)
+    valide_par_name = serializers.CharField(
+        source='valide_par.full_name', read_only=True, allow_null=True)
+
+    # ✅ CORRECTION : Utiliser un SerializerMethodField au lieu d'un champ direct
+    mouvement_reference = serializers.SerializerMethodField()
     supplier_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -200,13 +216,15 @@ class FraisSerializer(serializers.ModelSerializer):
             'id', 'reference', 'titre', 'warehouse', 'warehouse_nom', 'categorie',
             'montant', 'montant_formate', 'date_frais', 'date_paiement', 'beneficiaire',
             'piece_justificative', 'mode_paiement',
-            'mouvement', 'mouvement_reference',
+            # ❌ SUPPRIMER 'mouvement' car il n'existe pas dans le modèle
+            'mouvement_reference',  # ✅ Utiliser ce champ à la place
             'supplier_id', 'supplier_name',
             'status', 'notes',
             'created_at', 'updated_at', 'created_by', 'created_by_name',
             'valide_par', 'valide_par_name', 'date_validation'
         ]
-        read_only_fields = ['reference', 'mouvement', 'created_at', 'updated_at', 'created_by']
+        read_only_fields = ['reference',
+                            'created_at', 'updated_at', 'created_by']
 
     def get_montant_formate(self, obj):
         return f"{obj.montant:,.0f} FCFA"
@@ -221,10 +239,23 @@ class FraisSerializer(serializers.ModelSerializer):
                 return None
         return None
 
+    def get_mouvement_reference(self, obj):
+        """Récupère la référence du mouvement associé via l'ID"""
+        if obj.mouvement_id:
+            try:
+                from tresorerie.models import MouvementTresorerie
+                mouvement = MouvementTresorerie.objects.get(
+                    id=obj.mouvement_id)
+                return mouvement.reference
+            except:
+                return None
+        return None
 
 # ----------------------------------------------
 # 6. FRAIS - CREATE
 # ----------------------------------------------
+
+
 class FraisCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Frais
@@ -236,7 +267,8 @@ class FraisCreateSerializer(serializers.ModelSerializer):
 
     def validate_montant(self, value):
         if value <= 0:
-            raise serializers.ValidationError("Le montant doit être supérieur à 0.")
+            raise serializers.ValidationError(
+                "Le montant doit être supérieur à 0.")
         return value
 
 
@@ -247,7 +279,8 @@ class PrevisionTresorerieSerializer(serializers.ModelSerializer):
     montant_prevu_formate = serializers.SerializerMethodField()
     montant_reel_formate = serializers.SerializerMethodField()
     ecart_formate = serializers.SerializerMethodField()
-    warehouse_nom = serializers.CharField(source='warehouse.name', read_only=True, allow_null=True)
+    warehouse_nom = serializers.CharField(
+        source='warehouse.name', read_only=True, allow_null=True)
 
     class Meta:
         model = PrevisionTresorerie
@@ -264,7 +297,8 @@ class PrevisionTresorerieSerializer(serializers.ModelSerializer):
             'notes',
             'created_at', 'updated_at', 'created_by'
         ]
-        read_only_fields = ['reference', 'ecart', 'pourcentage_ecart', 'created_at', 'updated_at', 'created_by']
+        read_only_fields = ['reference', 'ecart', 'pourcentage_ecart',
+                            'created_at', 'updated_at', 'created_by']
 
     def get_montant_prevu_formate(self, obj):
         return f"{obj.montant_prevu:,.0f} FCFA"
@@ -302,7 +336,8 @@ class RapprochementBancaireSerializer(serializers.ModelSerializer):
             'valide_par', 'date_validation',
             'est_rapproche'
         ]
-        read_only_fields = ['reference', 'solde_rapproche', 'ecart', 'created_at', 'updated_at', 'created_by']
+        read_only_fields = ['reference', 'solde_rapproche',
+                            'ecart', 'created_at', 'updated_at', 'created_by']
 
     def get_solde_comptable_formate(self, obj):
         return f"{obj.solde_comptable:,.0f} FCFA"
@@ -321,7 +356,8 @@ class RapprochementBancaireSerializer(serializers.ModelSerializer):
 # 9. TRÉSORERIE JOURNALIÈRE
 # ----------------------------------------------
 class TresorerieJournaliereSerializer(serializers.ModelSerializer):
-    variation = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
+    variation = serializers.DecimalField(
+        max_digits=15, decimal_places=2, read_only=True)
     variation_formate = serializers.SerializerMethodField()
     solde_ouverture_formate = serializers.SerializerMethodField()
     solde_fermeture_formate = serializers.SerializerMethodField()
@@ -363,33 +399,75 @@ class TresorerieJournaliereSerializer(serializers.ModelSerializer):
 # ----------------------------------------------
 # 10. DASHBOARD TRÉSORERIE
 # ----------------------------------------------
+# apps/tresorerie/serializers.py
+# Modifier la méthode to_representation de TresorerieDashboardSerializer
+
 class TresorerieDashboardSerializer(serializers.Serializer):
     """
     Sérialiseur pour les statistiques du tableau de bord de trésorerie
     """
-    total_soldes_caisses = serializers.DecimalField(max_digits=15, decimal_places=2)
-    total_soldes_comptes = serializers.DecimalField(max_digits=15, decimal_places=2)
+    total_soldes_caisses = serializers.DecimalField(
+        max_digits=15, decimal_places=2)
+    total_soldes_comptes = serializers.DecimalField(
+        max_digits=15, decimal_places=2)
     total_global = serializers.DecimalField(max_digits=15, decimal_places=2)
     nb_caisses = serializers.IntegerField()
     nb_comptes = serializers.IntegerField()
     mouvements_recents = serializers.ListField(child=serializers.DictField())
-    entree_total_jour = serializers.DecimalField(max_digits=15, decimal_places=2)
-    sortie_total_jour = serializers.DecimalField(max_digits=15, decimal_places=2)
+    entree_total_jour = serializers.DecimalField(
+        max_digits=15, decimal_places=2)
+    sortie_total_jour = serializers.DecimalField(
+        max_digits=15, decimal_places=2)
     soldes_par_entrepot = serializers.ListField(child=serializers.DictField())
 
     def to_representation(self, instance):
-        # Ajouter des formats pour les montants
+        # ✅ CORRECTION : Vérifier que les valeurs sont des nombres avant de formater
         data = super().to_representation(instance)
-        
+
+        # Convertir les valeurs en Decimal si nécessaire
+        def safe_format(value, default=0):
+            try:
+                if isinstance(value, str):
+                    # Si c'est une chaîne, essayer de la convertir en nombre
+                    value = float(value.replace(',', '')
+                                  ) if ',' in value else float(value)
+                return f"{value:,.0f} FCFA"
+            except (ValueError, TypeError):
+                return f"{default:,.0f} FCFA"
+
         if 'total_soldes_caisses' in data:
-            data['total_soldes_caisses_formate'] = f"{data['total_soldes_caisses']:,.0f} FCFA"
+            try:
+                val = float(data['total_soldes_caisses'])
+                data['total_soldes_caisses_formate'] = f"{val:,.0f} FCFA"
+            except (ValueError, TypeError):
+                data['total_soldes_caisses_formate'] = "0 FCFA"
+
         if 'total_soldes_comptes' in data:
-            data['total_soldes_comptes_formate'] = f"{data['total_soldes_comptes']:,.0f} FCFA"
+            try:
+                val = float(data['total_soldes_comptes'])
+                data['total_soldes_comptes_formate'] = f"{val:,.0f} FCFA"
+            except (ValueError, TypeError):
+                data['total_soldes_comptes_formate'] = "0 FCFA"
+
         if 'total_global' in data:
-            data['total_global_formate'] = f"{data['total_global']:,.0f} FCFA"
+            try:
+                val = float(data['total_global'])
+                data['total_global_formate'] = f"{val:,.0f} FCFA"
+            except (ValueError, TypeError):
+                data['total_global_formate'] = "0 FCFA"
+
         if 'entree_total_jour' in data:
-            data['entree_total_jour_formate'] = f"{data['entree_total_jour']:,.0f} FCFA"
+            try:
+                val = float(data['entree_total_jour'])
+                data['entree_total_jour_formate'] = f"{val:,.0f} FCFA"
+            except (ValueError, TypeError):
+                data['entree_total_jour_formate'] = "0 FCFA"
+
         if 'sortie_total_jour' in data:
-            data['sortie_total_jour_formate'] = f"{data['sortie_total_jour']:,.0f} FCFA"
-        
+            try:
+                val = float(data['sortie_total_jour'])
+                data['sortie_total_jour_formate'] = f"{val:,.0f} FCFA"
+            except (ValueError, TypeError):
+                data['sortie_total_jour_formate'] = "0 FCFA"
+
         return data

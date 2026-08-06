@@ -4,7 +4,7 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from datetime import date, timedelta
 from decimal import Decimal
-
+from django.core.exceptions import ValidationError
 from users.models import CustomUser
 from produits_stocks.models import Warehouse
 
@@ -360,6 +360,9 @@ class MouvementTresorerie(models.Model):
 # ============================================================
 
 
+# apps/tresorerie/models.py
+# Partie Frais - COMPLÈTE ET CORRIGÉE
+
 class Frais(models.Model):
     """Frais et dépenses diverses"""
     CATEGORIE_FRAIS = (
@@ -395,8 +398,8 @@ class Frais(models.Model):
         Warehouse, on_delete=models.PROTECT, related_name='frais', verbose_name="Entrepôt/Magasin")
     categorie = models.CharField(
         max_length=20, choices=CATEGORIE_FRAIS, verbose_name="Catégorie")
-    montant = models.DecimalField(max_digits=15, decimal_places=2, validators=[
-                                  MinValueValidator(0)], verbose_name="Montant")
+    montant = models.DecimalField(
+        max_digits=15, decimal_places=2, validators=[MinValueValidator(0)], verbose_name="Montant")
     date_frais = models.DateField(
         default=timezone.now, verbose_name="Date du frais")
     date_paiement = models.DateField(
@@ -405,8 +408,6 @@ class Frais(models.Model):
         max_length=200, verbose_name="Bénéficiaire")
     piece_justificative = models.CharField(
         max_length=50, blank=True, null=True, verbose_name="Pièce justificative")
-
-    # ✅ MODE_PAIEMENT est maintenant défini
     mode_paiement = models.CharField(
         max_length=20, choices=MODE_PAIEMENT, default='especes', verbose_name="Mode de paiement")
 
@@ -421,10 +422,10 @@ class Frais(models.Model):
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL,
-                                   null=True, related_name='frais_crees', verbose_name="Créé par")
-    valide_par = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                   blank=True, related_name='frais_valides', verbose_name="Validé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, related_name='frais_crees', verbose_name="Créé par")
+    valide_par = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='frais_valides', verbose_name="Validé par")
     date_validation = models.DateTimeField(
         null=True, blank=True, verbose_name="Date validation")
 
@@ -437,6 +438,9 @@ class Frais(models.Model):
         return f"{self.reference} - {self.titre} ({self.montant:,.0f} XOF)"
 
     def save(self, *args, **kwargs):
+        # ✅ Vérifier que ValidationError est importé
+        from django.core.exceptions import ValidationError
+
         if not self.reference:
             from datetime import datetime
             prefix = f"FRAIS{datetime.now().strftime('%Y%m')}"
@@ -457,8 +461,10 @@ class Frais(models.Model):
             caisse_defaut = Caisse.objects.filter(
                 warehouse=self.warehouse, is_default=True).first()
             if not caisse_defaut:
+                # ✅ ValidationError est maintenant défini
                 raise ValidationError(
-                    f"Aucune caisse par défaut pour l'entrepôt '{self.warehouse.name}'."
+                    f"Aucune caisse par défaut pour l'entrepôt '{self.warehouse.name}'. "
+                    "Veuillez configurer une caisse par défaut."
                 )
 
             mouvement = MouvementTresorerie.objects.create(
@@ -489,10 +495,10 @@ class Frais(models.Model):
                 return None
         return None
 
-
 # ============================================================
 # 5. PRÉVISIONS DE TRÉSORERIE
 # ============================================================
+
 
 class PrevisionTresorerie(models.Model):
     """Prévision de trésorerie"""
