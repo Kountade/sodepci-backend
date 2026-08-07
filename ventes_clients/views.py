@@ -387,6 +387,55 @@ class DevisViewSet(viewsets.ModelViewSet):
 # VENTE VIEWSET - COMPLET AVEC TOUTES LES FONCTIONNALITÉS
 # ============================================================
 
+# apps/ventes_clients/views.py
+# ============================================================
+# VENTE VIEWSET - COMPLET CORRIGÉ
+# ============================================================
+
+import logging
+from io import BytesIO
+import json
+from datetime import date, timedelta
+
+from rest_framework import viewsets, status, permissions
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django.db.models import Q, Sum, Count
+from django.utils import timezone
+from django.http import HttpResponse
+
+from .models import (
+    Client, Vente, LigneVente, Paiement, Facture,
+    Avoir, Taxe, Remise, Devis, LigneDevis
+)
+from produits_stocks.models import Stock, StockMovement, Warehouse
+from users.permissions import IsAdmin, IsGestionnaire, IsCaissier
+
+from .serializers import (
+    ClientSerializer, ClientListSerializer,
+    VenteListSerializer, VenteDetailSerializer,
+    VenteCreateSerializer, VenteUpdateSerializer,
+    VenteStatusUpdateSerializer,
+    LigneVenteSerializer, LigneVenteCreateSerializer,
+    PaiementSerializer, PaiementCreateSerializer,
+    FactureSerializer, FactureCreateSerializer,
+    AvoirSerializer, AvoirCreateSerializer,
+    TaxeSerializer, RemiseSerializer,
+    DevisListSerializer, DevisDetailSerializer,
+    DevisCreateSerializer, DevisUpdateSerializer,
+    DevisStatusUpdateSerializer,
+    LigneDevisSerializer, LigneDevisCreateSerializer
+)
+
+from tresorerie.models import MouvementTresorerie, Caisse
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# VENTE VIEWSET - COMPLET
+# ============================================================
+
 class VenteViewSet(viewsets.ModelViewSet):
     queryset = Vente.objects.all()
     permission_classes = [permissions.IsAuthenticated]
@@ -446,7 +495,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
 
     # ================================================================
-    # 1. CONFIRMER UNE VENTE
+    # 1. CONFIRMER UNE VENTE - CORRIGÉ
     # ================================================================
     @action(detail=True, methods=['post'])
     def confirm(self, request, pk=None):
@@ -499,10 +548,10 @@ class VenteViewSet(viewsets.ModelViewSet):
             vente.save()
 
             # 4. CRÉATION DU MOUVEMENT DE TRÉSORERIE (ENCAISSEMENT)
+            mouvement = None
             try:
                 from tresorerie.models import MouvementTresorerie, Caisse
                 
-                # Vérifier si un mouvement existe déjà
                 existing_movement = MouvementTresorerie.objects.filter(
                     source_type='vente',
                     source_id=vente.id
@@ -531,7 +580,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                             created_by=request.user
                         )
                         
-                        # ✅ Augmenter la caisse
                         caisse.solde_actuel += vente.total
                         caisse.save(update_fields=['solde_actuel', 'updated_at'])
                         
@@ -541,18 +589,20 @@ class VenteViewSet(viewsets.ModelViewSet):
                         logger.warning(f"Aucune caisse par défaut pour l'entrepôt {vente.warehouse}")
                 else:
                     logger.info(f"Mouvement déjà existant pour la vente {vente.invoice_number}")
+                    mouvement = existing_movement
                     
             except ImportError:
                 logger.warning("Module tresorerie non disponible")
             except Exception as e:
                 logger.error(f"Erreur création mouvement trésorerie: {e}")
 
-            # 5. Génération de la facture (si elle n'existe pas déjà)
+            # 5. Génération de la facture
+            # ✅ IMPORT CORRECT à l'intérieur de la fonction
+            from .models import Facture
+            from datetime import date
+            
             facture = Facture.objects.filter(sale=vente).first()
             if not facture:
-                from datetime import date
-                from .models import Facture
-                
                 last_facture = Facture.objects.order_by('-id').first()
                 num = 1
                 if last_facture and last_facture.invoice_number:
@@ -577,13 +627,25 @@ class VenteViewSet(viewsets.ModelViewSet):
                 facture.generate_qr_code()
                 facture.save()
 
+            # 6. Mise à jour du statut de paiement
+            vente.amount_due = vente.total - vente.amount_paid
+            if vente.amount_due <= 0:
+                vente.payment_status = 'paid'
+            elif vente.amount_paid > 0:
+                vente.payment_status = 'partial'
+            else:
+                vente.payment_status = 'pending'
+            vente.save(update_fields=['amount_due', 'payment_status'])
+
             return Response({
                 'status': vente.status,
                 'message': 'Vente confirmée avec succès',
                 'invoice_number': vente.invoice_number,
                 'facture_generée': facture is not None,
                 'facture_number': facture.invoice_number if facture else None,
-                'mouvement_cree': mouvement is not None if 'mouvement' in locals() else False
+                'mouvement_cree': mouvement is not None,
+                'payment_status': vente.payment_status,
+                'amount_due': vente.amount_due
             })
 
         except Exception as e:
@@ -631,7 +693,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Calculer le montant dû
         amount_due = vente.total - vente.amount_paid
         if amount > amount_due:
             return Response(
@@ -640,7 +701,6 @@ class VenteViewSet(viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
-            # Récupérer la facture de la vente
             facture = vente.invoices.first()
             if not facture:
                 return Response(
@@ -648,7 +708,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Créer le paiement
             paiement = Paiement.objects.create(
                 facture=facture,
                 amount=amount,
@@ -661,7 +720,6 @@ class VenteViewSet(viewsets.ModelViewSet):
             )
             logger.info(f"✅ Paiement créé : ID {paiement.id}")
 
-            # Mettre à jour la facture
             total_paid_facture = facture.paiements.aggregate(
                 total=Sum('amount')
             )['total'] or Decimal('0')
@@ -672,7 +730,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 facture.status = 'partial'
             facture.save()
 
-            # Mettre à jour la vente
             vente.amount_paid += amount
             vente.amount_due = vente.total - vente.amount_paid
             if vente.amount_due <= 0:
@@ -684,11 +741,10 @@ class VenteViewSet(viewsets.ModelViewSet):
                 vente.payment_status = 'pending'
             vente.save()
 
-            # CRÉER LE MOUVEMENT DE TRÉSORERIE (ENCAISSEMENT)
+            # CRÉER LE MOUVEMENT DE TRÉSORERIE
             try:
                 from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
 
-                # Récupérer la caisse ou le compte
                 caisse = None
                 compte = None
 
@@ -704,7 +760,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                     except CompteBancaire.DoesNotExist:
                         pass
 
-                # Si aucune destination spécifiée, prendre la caisse par défaut
                 if not caisse and not compte:
                     caisse = Caisse.objects.filter(
                         warehouse=vente.warehouse,
@@ -712,7 +767,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                     ).first()
 
                 if caisse or compte:
-                    # Vérifier si un mouvement existe déjà
                     existing_movement = MouvementTresorerie.objects.filter(
                         source_type='paiement_client',
                         source_id=paiement.id
@@ -736,7 +790,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                             created_by=request.user
                         )
                         
-                        # Mettre à jour le solde
                         if caisse:
                             caisse.solde_actuel += paiement.amount
                             caisse.save(update_fields=['solde_actuel', 'updated_at'])
@@ -825,7 +878,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Créer un paiement automatique
         amount_due = vente.amount_due
         if amount_due <= 0:
             return Response(
@@ -833,7 +885,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Enregistrer le paiement
         return self.register_payment(request, pk)
 
     # ================================================================
@@ -1034,7 +1085,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             'by_status': by_status,
             'by_payment_status': by_payment_status
         })
-# ============================================================
+
 # FACTURE VIEWSET
 # ============================================================
 

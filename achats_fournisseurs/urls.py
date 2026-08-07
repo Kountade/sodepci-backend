@@ -22,14 +22,12 @@ router.register('purchase-returns', PurchaseReturnViewSet,
                 basename='purchase-returns')
 router.register('supplier-invoices', SupplierInvoiceViewSet,
                 basename='supplier-invoices')
-
-# NOUVEAU : Paiements fournisseurs
 router.register('fournisseur-paiements',
                 FournisseurPaiementViewSet, basename='fournisseur-paiements')
 
-# NOUVEAU : Dashboard stats
-router.register('achats-dashboard-stats',
-                AchatsDashboardStatsViewSet, basename='achats-dashboard-stats')
+# ✅ MODIFICATION : Utiliser dashboard-stats au lieu de achats-dashboard-stats
+router.register('dashboard-stats', AchatsDashboardStatsViewSet,
+                basename='dashboard-stats')
 
 urlpatterns = [
     path('', include(router.urls)),
