@@ -223,6 +223,8 @@ class SupplierProduct(models.Model):
 # BON DE COMMANDE
 # ============================================================
 
+# apps/achats_fournisseurs/models.py - Partie PurchaseOrder
+
 class PurchaseOrder(models.Model):
     STATUS_CHOICES = (
         ('draft', 'Brouillon'),
@@ -347,19 +349,36 @@ class PurchaseOrder(models.Model):
                   'discount_amount', 'tax_amount', 'total'])
 
     def update_receipt_status(self):
+        """✅ CORRIGÉ : Met à jour le statut en fonction des quantités reçues"""
         total_ordered = self.lines.aggregate(
             total=Sum('quantity'))['total'] or 0
         total_received = self.lines.aggregate(
             total=Sum('quantity_received'))['total'] or 0
+
+        # Si aucune ligne ou quantité commandée = 0
         if total_ordered == 0:
             self.is_fully_received = False
+            if self.status not in ['cancelled', 'draft']:
+                self.status = 'confirmed'
         else:
-            self.is_fully_received = total_received >= total_ordered
-        if self.is_fully_received and self.status not in ['cancelled']:
-            if self.status != 'received':
+            # Vérifier si tout est reçu
+            all_received = True
+            for line in self.lines.all():
+                if line.quantity_received < line.quantity:
+                    all_received = False
+                    break
+
+            self.is_fully_received = all_received
+
+            if self.status in ['cancelled', 'draft']:
+                pass  # Ne pas changer le statut si annulé ou brouillon
+            elif all_received:
                 self.status = 'received'
-        elif total_received > 0 and self.status not in ['cancelled']:
-            self.status = 'partial'
+            elif total_received > 0:
+                self.status = 'partial'  # ✅ Statut partiel
+            else:
+                self.status = 'confirmed'  # Pas encore de réception
+
         self.save(update_fields=['is_fully_received', 'status'])
 
     def update_invoice_status(self):
@@ -373,7 +392,6 @@ class PurchaseOrder(models.Model):
         self.save(update_fields=['total_invoiced_amount', 'is_fully_invoiced'])
 
     def update_payment_status(self):
-        from .models import FournisseurPaiement
         total_paid = self.paiements.filter(status='confirmed').aggregate(
             total=Sum('amount'))['total'] or 0
         self.total_paid_amount = total_paid

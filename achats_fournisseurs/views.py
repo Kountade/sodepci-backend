@@ -143,6 +143,7 @@ class SupplierViewSet(viewsets.ModelViewSet):
 # ============================================================
 # BON DE COMMANDE VIEWSET
 # ============================================================
+# apps/achats_fournisseurs/views.py - Partie PurchaseOrderViewSet
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all()
@@ -174,9 +175,15 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         supplier = self.request.query_params.get('supplier')
         if supplier:
             queryset = queryset.filter(supplier_id=supplier)
+
+        # ✅ CORRECTION : Gestion du statut pour les réceptions
         status_filter = self.request.query_params.get('status')
-        if status_filter:
+        if status_filter == 'confirmed':
+            # Pour la liste des réceptions : inclure 'confirmed' ET 'partial'
+            queryset = queryset.filter(status__in=['confirmed', 'partial'])
+        elif status_filter:
             queryset = queryset.filter(status=status_filter)
+
         date_from = self.request.query_params.get('date_from')
         if date_from:
             queryset = queryset.filter(order_date__date__gte=date_from)
@@ -190,6 +197,38 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+    @action(detail=False, methods=['get'])
+    def available_for_receipt(self, request):
+        """
+        ✅ NOUVEL ENDPOINT : Récupère les commandes disponibles pour réception
+        - Commandes confirmées (status='confirmed')
+        - Commandes partiellement reçues (status='partial') qui ne sont pas encore entièrement reçues
+        """
+        queryset = PurchaseOrder.objects.filter(
+            status__in=['confirmed', 'partial'],
+            is_fully_received=False
+        ).order_by('-order_date')
+
+        # Filtrer par recherche
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(po_number__icontains=search) |
+                Q(supplier__name__icontains=search)
+            )
+
+        # Filtrer par fournisseur
+        supplier = request.query_params.get('supplier')
+        if supplier:
+            queryset = queryset.filter(supplier_id=supplier)
+
+        # Exclure les commandes déjà entièrement reçues (sécurité)
+        queryset = queryset.filter(is_fully_received=False)
+
+        serializer = PurchaseOrderListSerializer(
+            queryset, many=True, context={'request': request})
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
@@ -282,10 +321,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-
 # ============================================================
 # RÉCEPTION VIEWSET
 # ============================================================
+
 
 class ReceiptViewSet(viewsets.ModelViewSet):
     queryset = Receipt.objects.all()
@@ -334,7 +373,8 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     def available_for_invoice(self, request):
         purchase_order_id = request.query_params.get('purchase_order')
         supplier_id = request.query_params.get('supplier')
-        queryset = Receipt.objects.filter(status='completed', is_invoiced=False)
+        queryset = Receipt.objects.filter(
+            status='completed', is_invoiced=False)
         if purchase_order_id:
             queryset = queryset.filter(purchase_order_id=purchase_order_id)
         if supplier_id:
@@ -462,7 +502,7 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        
+
         purchase_order = self.request.query_params.get('purchase_order')
         if purchase_order:
             queryset = queryset.filter(purchase_order_id=purchase_order)
@@ -484,7 +524,8 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
                 queryset = queryset.filter(paiement_status=paiement_status)
 
         # ✅ Filtrer les factures disponibles pour paiement
-        available_for_payment = self.request.query_params.get('available_for_payment')
+        available_for_payment = self.request.query_params.get(
+            'available_for_payment')
         if available_for_payment == 'true':
             queryset = queryset.filter(is_fully_paid=False)
 
@@ -516,17 +557,17 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
     def add_payment(self, request, pk=None):
         """✅ Ajouter un paiement à une facture"""
         invoice = self.get_object()
-        
+
         if invoice.is_fully_paid:
             return Response({
                 "error": "❌ Cette facture est déjà entièrement payée"
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = SupplierInvoicePaymentSerializer(data=request.data)
-        
+
         if serializer.is_valid():
             amount = serializer.validated_data['amount']
-            
+
             if amount > invoice.remaining_amount:
                 return Response({
                     "error": f"⚠️ Le montant ({amount:,.0f} FCFA) dépasse le solde restant ({invoice.remaining_amount:,.0f} FCFA)"
@@ -542,16 +583,16 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
                 'compte_destination_id': serializer.validated_data.get('compte_destination_id'),
                 'notes': f"Paiement enregistré depuis la facture {invoice.invoice_number}"
             }
-            
+
             payment_serializer = FournisseurPaiementCreateSerializer(
                 data=payment_data,
                 context={'request': request}
             )
-            
+
             if payment_serializer.is_valid():
                 payment = payment_serializer.save()
                 invoice.refresh_from_db()
-                
+
                 return Response({
                     'status': 'success',
                     'message': '✅ Paiement enregistré avec succès',
@@ -562,14 +603,15 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_201_CREATED)
             else:
                 return Response(payment_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
+
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['get'])
     def available_for_payment(self, request):
         """✅ Récupère les factures disponibles pour paiement"""
         supplier_id = request.query_params.get('supplier')
-        queryset = SupplierInvoice.objects.filter(is_fully_paid=False).order_by('due_date')
+        queryset = SupplierInvoice.objects.filter(
+            is_fully_paid=False).order_by('due_date')
         if supplier_id:
             queryset = queryset.filter(supplier_id=supplier_id)
         serializer = SupplierInvoiceListSerializer(queryset, many=True)
@@ -612,7 +654,7 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        
+
         supplier_invoice = self.request.query_params.get('supplier_invoice')
         if supplier_invoice:
             queryset = queryset.filter(supplier_invoice_id=supplier_invoice)
@@ -668,7 +710,8 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
         if paiement.mouvement_tresorerie_id:
             try:
                 from tresorerie.models import MouvementTresorerie
-                mouvement = MouvementTresorerie.objects.get(id=paiement.mouvement_tresorerie_id)
+                mouvement = MouvementTresorerie.objects.get(
+                    id=paiement.mouvement_tresorerie_id)
                 mouvement.status = 'cancelled'
                 mouvement.save()
             except:
@@ -722,28 +765,35 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
             order_date__year=today.year
         ).count()
 
-        total_amount = PurchaseOrder.objects.aggregate(total=Sum('total'))['total'] or 0
+        total_amount = PurchaseOrder.objects.aggregate(total=Sum('total'))[
+            'total'] or 0
         amount_this_month = PurchaseOrder.objects.filter(
             order_date__month=today.month,
             order_date__year=today.year
         ).aggregate(total=Sum('total'))['total'] or 0
 
         total_received = Receipt.objects.filter(status='completed').count()
-        pending_receipts = Receipt.objects.filter(status__in=['pending', 'in_progress']).count()
-        non_invoiced_receipts = Receipt.objects.filter(is_invoiced=False, status='completed').count()
+        pending_receipts = Receipt.objects.filter(
+            status__in=['pending', 'in_progress']).count()
+        non_invoiced_receipts = Receipt.objects.filter(
+            is_invoiced=False, status='completed').count()
 
-        received_amount = PurchaseOrder.objects.aggregate(total=Sum('total_received_amount'))['total'] or 0
+        received_amount = PurchaseOrder.objects.aggregate(
+            total=Sum('total_received_amount'))['total'] or 0
         remaining_to_receive = total_amount - received_amount
 
         total_invoices = SupplierInvoice.objects.count()
-        unpaid_invoices = SupplierInvoice.objects.filter(paiement_status__in=['unpaid', 'partial', 'overdue']).count()
+        unpaid_invoices = SupplierInvoice.objects.filter(
+            paiement_status__in=['unpaid', 'partial', 'overdue']).count()
         overdue_invoices = SupplierInvoice.objects.filter(
             due_date__lt=today,
             paiement_status__in=['unpaid', 'partial']
         ).count()
 
-        total_invoiced = SupplierInvoice.objects.aggregate(total=Sum('total_amount'))['total'] or 0
-        total_paid = SupplierInvoice.objects.aggregate(total=Sum('amount_paid'))['total'] or 0
+        total_invoiced = SupplierInvoice.objects.aggregate(
+            total=Sum('total_amount'))['total'] or 0
+        total_paid = SupplierInvoice.objects.aggregate(
+            total=Sum('amount_paid'))['total'] or 0
         total_remaining_to_pay = total_invoiced - total_paid
 
         top_suppliers = Supplier.objects.annotate(

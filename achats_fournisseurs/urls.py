@@ -13,7 +13,6 @@ from .views import (
 
 router = DefaultRouter()
 
-# Endpoints principaux
 router.register('suppliers', SupplierViewSet, basename='suppliers')
 router.register('purchase-orders', PurchaseOrderViewSet,
                 basename='purchase-orders')
@@ -24,8 +23,6 @@ router.register('supplier-invoices', SupplierInvoiceViewSet,
                 basename='supplier-invoices')
 router.register('fournisseur-paiements',
                 FournisseurPaiementViewSet, basename='fournisseur-paiements')
-
-# ✅ MODIFICATION : Utiliser dashboard-stats au lieu de achats-dashboard-stats
 router.register('dashboard-stats', AchatsDashboardStatsViewSet,
                 basename='dashboard-stats')
 
