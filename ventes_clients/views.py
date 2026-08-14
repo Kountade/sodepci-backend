@@ -85,13 +85,13 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
 
     try:
         from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
-        
+
         # ✅ VÉRIFIER SI UN MOUVEMENT EXISTE DÉJÀ (sans utiliser mouvements_tresorerie)
         existing_movement = MouvementTresorerie.objects.filter(
             source_type='paiement_client',
             source_id=paiement.id
         ).first()
-        
+
         if existing_movement:
             logger.info(
                 f"ℹ️ Paiement {paiement.id} : mouvement déjà existant ({existing_movement.reference})")
@@ -100,31 +100,35 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
         # Récupérer la caisse ou le compte de destination
         caisse = None
         compte = None
-        
+
         # Vérifier si le paiement a une caisse de destination
         if hasattr(paiement, 'caisse_destination_id') and paiement.caisse_destination_id:
             try:
                 caisse = Caisse.objects.get(id=paiement.caisse_destination_id)
                 logger.info(f"✅ Caisse trouvée : {caisse.nom}")
             except Caisse.DoesNotExist:
-                logger.warning(f"⚠️ Caisse ID {paiement.caisse_destination_id} non trouvée")
-                
+                logger.warning(
+                    f"⚠️ Caisse ID {paiement.caisse_destination_id} non trouvée")
+
         # Vérifier si le paiement a un compte de destination
         if hasattr(paiement, 'compte_destination_id') and paiement.compte_destination_id:
             try:
-                compte = CompteBancaire.objects.get(id=paiement.compte_destination_id)
+                compte = CompteBancaire.objects.get(
+                    id=paiement.compte_destination_id)
                 logger.info(f"✅ Compte trouvé : {compte.nom}")
             except CompteBancaire.DoesNotExist:
-                logger.warning(f"⚠️ Compte ID {paiement.compte_destination_id} non trouvé")
+                logger.warning(
+                    f"⚠️ Compte ID {paiement.compte_destination_id} non trouvé")
 
         # Si aucune destination spécifiée, prendre la caisse par défaut de l'entrepôt
         if not caisse and not compte:
-            logger.info("ℹ️ Aucune destination spécifiée, recherche de la caisse par défaut...")
+            logger.info(
+                "ℹ️ Aucune destination spécifiée, recherche de la caisse par défaut...")
             caisse = Caisse.objects.filter(
-                warehouse=sale.warehouse, 
+                warehouse=sale.warehouse,
                 is_default=True
             ).first()
-            
+
             if caisse:
                 logger.info(f"✅ Caisse par défaut trouvée : {caisse.nom}")
             else:
@@ -135,13 +139,14 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
                 ).first()
                 if caisse:
                     logger.info(f"✅ Caisse active trouvée : {caisse.nom}")
-            
+
         if not caisse and not compte:
             logger.warning(
                 f"❌ Paiement {paiement.id} : aucune caisse ou compte disponible pour l'entrepôt {sale.warehouse}")
             return None
 
-        logger.info(f"✅ Destination finale : {caisse.nom if caisse else compte.nom}")
+        logger.info(
+            f"✅ Destination finale : {caisse.nom if caisse else compte.nom}")
 
         # Créer le mouvement d'encaissement
         mouvement = MouvementTresorerie.objects.create(
@@ -160,23 +165,25 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
             libelle=f"Paiement client - {facture.invoice_number} - {facture.client.name}",
             created_by=request_user
         )
-        
+
         # ✅ Mettre à jour le solde de la caisse (augmentation)
         if caisse:
             caisse.solde_actuel += paiement.amount
             caisse.save(update_fields=['solde_actuel', 'updated_at'])
-            logger.info(f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
-            
+            logger.info(
+                f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
+
         # ✅ Mettre à jour le solde du compte bancaire (augmentation)
         if compte:
             compte.solde_actuel += paiement.amount
             compte.save(update_fields=['solde_actuel', 'updated_at'])
-            logger.info(f"💰 Compte {compte.nom} augmenté de {paiement.amount:,.0f} FCFA")
+            logger.info(
+                f"💰 Compte {compte.nom} augmenté de {paiement.amount:,.0f} FCFA")
 
         logger.info(
             f"✅ Mouvement d'encaissement créé pour paiement {paiement.id} : {mouvement.reference}")
         return mouvement
-        
+
     except ImportError as e:
         logger.error(f"❌ Erreur d'importation du module trésorerie: {e}")
         return None
@@ -189,6 +196,7 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
 # ============================================================
 # CLIENT VIEWSET
 # ============================================================
+
 
 class ClientViewSet(viewsets.ModelViewSet):
     queryset = Client.objects.all()
@@ -392,42 +400,6 @@ class DevisViewSet(viewsets.ModelViewSet):
 # VENTE VIEWSET - COMPLET CORRIGÉ
 # ============================================================
 
-import logging
-from io import BytesIO
-import json
-from datetime import date, timedelta
-
-from rest_framework import viewsets, status, permissions
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from django.db.models import Q, Sum, Count
-from django.utils import timezone
-from django.http import HttpResponse
-
-from .models import (
-    Client, Vente, LigneVente, Paiement, Facture,
-    Avoir, Taxe, Remise, Devis, LigneDevis
-)
-from produits_stocks.models import Stock, StockMovement, Warehouse
-from users.permissions import IsAdmin, IsGestionnaire, IsCaissier
-
-from .serializers import (
-    ClientSerializer, ClientListSerializer,
-    VenteListSerializer, VenteDetailSerializer,
-    VenteCreateSerializer, VenteUpdateSerializer,
-    VenteStatusUpdateSerializer,
-    LigneVenteSerializer, LigneVenteCreateSerializer,
-    PaiementSerializer, PaiementCreateSerializer,
-    FactureSerializer, FactureCreateSerializer,
-    AvoirSerializer, AvoirCreateSerializer,
-    TaxeSerializer, RemiseSerializer,
-    DevisListSerializer, DevisDetailSerializer,
-    DevisCreateSerializer, DevisUpdateSerializer,
-    DevisStatusUpdateSerializer,
-    LigneDevisSerializer, LigneDevisCreateSerializer
-)
-
-from tresorerie.models import MouvementTresorerie, Caisse
 
 logger = logging.getLogger(__name__)
 
@@ -551,12 +523,12 @@ class VenteViewSet(viewsets.ModelViewSet):
             mouvement = None
             try:
                 from tresorerie.models import MouvementTresorerie, Caisse
-                
+
                 existing_movement = MouvementTresorerie.objects.filter(
                     source_type='vente',
                     source_id=vente.id
                 ).first()
-                
+
                 if not existing_movement:
                     caisse = Caisse.objects.filter(
                         warehouse=vente.warehouse,
@@ -579,18 +551,23 @@ class VenteViewSet(viewsets.ModelViewSet):
                             libelle=f"Vente {vente.invoice_number} - {vente.client_name}",
                             created_by=request.user
                         )
-                        
+
                         caisse.solde_actuel += vente.total
-                        caisse.save(update_fields=['solde_actuel', 'updated_at'])
-                        
-                        logger.info(f"✅ Mouvement d'encaissement créé pour la vente {vente.invoice_number}")
-                        logger.info(f"💰 Caisse {caisse.nom} augmentée de {vente.total:,.0f} FCFA")
+                        caisse.save(update_fields=[
+                                    'solde_actuel', 'updated_at'])
+
+                        logger.info(
+                            f"✅ Mouvement d'encaissement créé pour la vente {vente.invoice_number}")
+                        logger.info(
+                            f"💰 Caisse {caisse.nom} augmentée de {vente.total:,.0f} FCFA")
                     else:
-                        logger.warning(f"Aucune caisse par défaut pour l'entrepôt {vente.warehouse}")
+                        logger.warning(
+                            f"Aucune caisse par défaut pour l'entrepôt {vente.warehouse}")
                 else:
-                    logger.info(f"Mouvement déjà existant pour la vente {vente.invoice_number}")
+                    logger.info(
+                        f"Mouvement déjà existant pour la vente {vente.invoice_number}")
                     mouvement = existing_movement
-                    
+
             except ImportError:
                 logger.warning("Module tresorerie non disponible")
             except Exception as e:
@@ -600,18 +577,19 @@ class VenteViewSet(viewsets.ModelViewSet):
             # ✅ IMPORT CORRECT à l'intérieur de la fonction
             from .models import Facture
             from datetime import date
-            
+
             facture = Facture.objects.filter(sale=vente).first()
             if not facture:
                 last_facture = Facture.objects.order_by('-id').first()
                 num = 1
                 if last_facture and last_facture.invoice_number:
                     try:
-                        num = int(last_facture.invoice_number.split('-')[-1]) + 1
+                        num = int(
+                            last_facture.invoice_number.split('-')[-1]) + 1
                     except (ValueError, IndexError):
                         num = 1
                 invoice_number = f"FAC-{date.today().year}-{num:04d}"
-                
+
                 facture = Facture.objects.create(
                     invoice_number=invoice_number,
                     sale=vente,
@@ -756,7 +734,8 @@ class VenteViewSet(viewsets.ModelViewSet):
 
                 if compte_destination_id:
                     try:
-                        compte = CompteBancaire.objects.get(id=compte_destination_id)
+                        compte = CompteBancaire.objects.get(
+                            id=compte_destination_id)
                     except CompteBancaire.DoesNotExist:
                         pass
 
@@ -789,23 +768,30 @@ class VenteViewSet(viewsets.ModelViewSet):
                             libelle=f"Paiement vente {vente.invoice_number} - {vente.client_name}",
                             created_by=request.user
                         )
-                        
+
                         if caisse:
                             caisse.solde_actuel += paiement.amount
-                            caisse.save(update_fields=['solde_actuel', 'updated_at'])
-                            logger.info(f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
-                            
+                            caisse.save(update_fields=[
+                                        'solde_actuel', 'updated_at'])
+                            logger.info(
+                                f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
+
                         if compte:
                             compte.solde_actuel += paiement.amount
-                            compte.save(update_fields=['solde_actuel', 'updated_at'])
-                            logger.info(f"💰 Compte {compte.nom} augmenté de {paiement.amount:,.0f} FCFA")
-                        
-                        logger.info(f"✅ Mouvement d'encaissement créé pour le paiement {paiement.id}")
+                            compte.save(update_fields=[
+                                        'solde_actuel', 'updated_at'])
+                            logger.info(
+                                f"💰 Compte {compte.nom} augmenté de {paiement.amount:,.0f} FCFA")
+
+                        logger.info(
+                            f"✅ Mouvement d'encaissement créé pour le paiement {paiement.id}")
                     else:
-                        logger.info(f"Mouvement déjà existant pour le paiement {paiement.id}")
+                        logger.info(
+                            f"Mouvement déjà existant pour le paiement {paiement.id}")
                 else:
-                    logger.warning(f"Aucune destination pour le paiement {paiement.id}")
-                    
+                    logger.warning(
+                        f"Aucune destination pour le paiement {paiement.id}")
+
             except ImportError:
                 logger.warning("Module tresorerie non disponible")
             except Exception as e:
@@ -827,32 +813,33 @@ class VenteViewSet(viewsets.ModelViewSet):
         vente = self.get_object()
         status_value = request.data.get('status')
         notes = request.data.get('notes', '')
-        
+
         if not status_value:
             return Response(
                 {"error": "Le statut est requis"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        allowed_statuses = ['draft', 'confirmed', 'paid', 'delivered', 'cancelled', 'returned']
+
+        allowed_statuses = ['draft', 'confirmed',
+                            'paid', 'delivered', 'cancelled', 'returned']
         if status_value not in allowed_statuses:
             return Response(
                 {"error": f"Statut invalide. Choisir parmi: {', '.join(allowed_statuses)}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         old_status = vente.status
         is_confirming = old_status == 'draft' and status_value == 'confirmed'
-        
+
         if is_confirming:
             return self.confirm(request, pk)
-        
+
         try:
             vente.status = status_value
             if notes:
                 vente.notes = vente.notes + '\n' + notes if vente.notes else notes
             vente.save()
-            
+
             return Response({
                 'status': vente.status,
                 'old_status': old_status,
@@ -871,20 +858,20 @@ class VenteViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def mark_paid(self, request, pk=None):
         vente = self.get_object()
-        
+
         if vente.status not in ['confirmed', 'delivered']:
             return Response(
                 {"error": "Seule une vente confirmée ou livrée peut être marquée comme payée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         amount_due = vente.amount_due
         if amount_due <= 0:
             return Response(
                 {"error": "Cette vente est déjà entièrement payée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         return self.register_payment(request, pk)
 
     # ================================================================
@@ -893,13 +880,13 @@ class VenteViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         vente = self.get_object()
-        
+
         if vente.status in ['paid', 'delivered']:
             return Response(
                 {"error": "Cette vente ne peut pas être annulée car elle est déjà payée ou livrée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             old_status = vente.status
             if old_status == 'confirmed':
@@ -908,7 +895,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             vente.save()
             vente.generate_qr_code()
             vente.save(update_fields=['qr_code', 'qr_code_data', 'updated_at'])
-            
+
             return Response({
                 'status': vente.status,
                 'old_status': old_status,
@@ -928,20 +915,20 @@ class VenteViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def deliver(self, request, pk=None):
         vente = self.get_object()
-        
+
         if vente.status != 'confirmed':
             return Response(
                 {"error": "Seule une vente confirmée peut être marquée comme livrée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         vente.status = 'delivered'
         vente.delivery_date = timezone.now()
         vente.delivery_status = 'delivered'
         if request.data.get('tracking_number'):
             vente.tracking_number = request.data.get('tracking_number')
         vente.save()
-        
+
         return Response({
             'status': vente.status,
             'delivery_status': vente.delivery_status,
@@ -956,18 +943,18 @@ class VenteViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def return_sale(self, request, pk=None):
         vente = self.get_object()
-        
+
         if vente.status not in ['delivered', 'paid']:
             return Response(
                 {"error": "Seules les ventes livrées ou payées peuvent être retournées"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             vente.restore_stock()
             vente.status = 'returned'
             vente.save()
-            
+
             return Response({
                 'status': vente.status,
                 'message': 'Vente retournée avec succès',
@@ -1049,28 +1036,28 @@ class VenteViewSet(viewsets.ModelViewSet):
         days = int(request.query_params.get('days', 30))
         start_date = timezone.now() - timedelta(days=days)
         ventes = Vente.objects.filter(sale_date__gte=start_date)
-        
+
         total_ventes = ventes.count()
         total_montant = ventes.aggregate(total=Sum('total'))['total'] or 0
         total_paye = ventes.aggregate(total=Sum('amount_paid'))['total'] or 0
         total_due = total_montant - total_paye
-        
+
         by_status = {}
         for status_choice in Vente.STATUS_CHOICES:
             status_code = status_choice[0]
             count = ventes.filter(status=status_code).count()
             if count > 0:
                 by_status[status_code] = count
-        
+
         by_payment_status = {}
         for status_choice in Vente.PAYMENT_STATUS_CHOICES:
             status_code = status_choice[0]
             count = ventes.filter(payment_status=status_code).count()
             if count > 0:
                 by_payment_status[status_code] = count
-        
+
         avg_amount = total_montant / total_ventes if total_ventes > 0 else 0
-        
+
         return Response({
             'period': {
                 'days': days,
