@@ -1468,25 +1468,44 @@ class Vente(models.Model):
 # LIGNE VENTE
 # ============================================================
 
+# apps/ventes_clients/models.py
+# ============================================================
+# LIGNE VENTE - COMPLET AVEC PRICE_TYPE
+# ============================================================
+
 class LigneVente(models.Model):
+    """
+    Ligne de vente avec gestion du type de prix (détail/gros)
+    """
+
+    # ============================================================
+    # RELATIONS
+    # ============================================================
 
     sale = models.ForeignKey(
-        Vente,
+        'Vente',
         on_delete=models.CASCADE,
-        related_name="lines"
+        related_name="lines",
+        verbose_name="Vente"
     )
 
     product = models.ForeignKey(
-        Product,
-        on_delete=models.PROTECT
+        'produits_stocks.Product',
+        on_delete=models.PROTECT,
+        verbose_name="Produit"
     )
 
     lot = models.ForeignKey(
-        Lot,
+        'produits_stocks.Lot',
         on_delete=models.SET_NULL,
         null=True,
-        blank=True
+        blank=True,
+        verbose_name="Lot"
     )
+
+    # ============================================================
+    # QUANTITÉS ET PRIX
+    # ============================================================
 
     quantity = models.PositiveIntegerField(
         verbose_name="Quantité"
@@ -1494,68 +1513,213 @@ class LigneVente(models.Model):
 
     unit_price = models.DecimalField(
         max_digits=10,
-        decimal_places=2
+        decimal_places=2,
+        verbose_name="Prix unitaire"
     )
+
+    # ============================================================
+    # REMISES ET TAXES
+    # ============================================================
 
     discount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        default=Decimal("0.00")
+        default=Decimal("0.00"),
+        verbose_name="Remise"
     )
 
     tax_rate = models.DecimalField(
         max_digits=5,
         decimal_places=2,
-        default=Decimal("0.00")
+        default=Decimal("0.00"),
+        verbose_name="Taux de TVA (%)"
     )
+
+    # ============================================================
+    # TOTAUX
+    # ============================================================
 
     total = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        default=Decimal("0.00")
+        default=Decimal("0.00"),
+        verbose_name="Total ligne"
     )
 
+    # ============================================================
+    # 🆕 TYPE DE PRIX (DÉTAIL / GROS)
+    # ============================================================
+
+    PRICE_TYPE_CHOICES = (
+        ('detail', 'Prix de détail'),
+        ('gros', 'Prix de gros'),
+    )
+
+    price_type = models.CharField(
+        max_length=20,
+        choices=PRICE_TYPE_CHOICES,
+        default='detail',
+        verbose_name="Type de prix utilisé"
+    )
+
+    # ============================================================
+    # NOTES
+    # ============================================================
+
     notes = models.TextField(
-        blank=True
+        blank=True,
+        verbose_name="Notes"
+    )
+
+    # ============================================================
+    # MÉTADONNÉES
+    # ============================================================
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Date de création"
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name="Date de modification"
     )
 
     class Meta:
         verbose_name = "Ligne de vente"
         verbose_name_plural = "Lignes de vente"
+        ordering = ['id']
 
     def __str__(self):
-
         return (
             f"{self.sale.invoice_number} - "
-            f"{self.product.name}"
+            f"{self.product.name} "
+            f"({self.quantity} x {self.unit_price})"
         )
 
+    # ============================================================
+    # PROPRIÉTÉS
+    # ============================================================
+
+    @property
+    def subtotal(self):
+        """Sous-total avant remise"""
+        return Decimal(self.quantity) * self.unit_price
+
+    @property
+    def discount_amount(self):
+        """Montant de la remise"""
+        if self.discount > 0:
+            return self.discount
+        return Decimal("0.00")
+
+    @property
+    def tax_amount(self):
+        """Montant de la TVA"""
+        if self.tax_rate > 0:
+            return (self.subtotal - self.discount) * (self.tax_rate / Decimal("100"))
+        return Decimal("0.00")
+
+    @property
+    def total_without_tax(self):
+        """Total hors taxe"""
+        return self.subtotal - self.discount
+
+    @property
+    def price_type_display(self):
+        """Affichage du type de prix"""
+        return dict(self.PRICE_TYPE_CHOICES).get(self.price_type, self.price_type)
+
+    # ============================================================
+    # MÉTHODES
+    # ============================================================
+
+    def calculate_total(self):
+        """
+        Calcule le total de la ligne
+        """
+        # Calcul du sous-total
+        subtotal = Decimal(self.quantity) * self.unit_price
+
+        # Application de la remise
+        self.total = max(
+            Decimal("0.00"),
+            subtotal - self.discount
+        )
+
+        return self.total
+
     def save(self, *args, **kwargs):
-
+        """
+        Sauvegarde avec calcul automatique du total
+        """
+        # Validation de la quantité
         if self.quantity <= 0:
-
             raise ValidationError(
                 "La quantité doit être supérieure à zéro."
             )
 
-        gross_total = (
-            Decimal(self.quantity)
-            * self.unit_price
-        )
+        # Validation du prix
+        if self.unit_price <= 0:
+            raise ValidationError(
+                "Le prix unitaire doit être supérieur à zéro."
+            )
 
-        self.total = max(
-            Decimal("0.00"),
-            gross_total - self.discount
-        )
+        # Validation du type de prix
+        if self.price_type not in ['detail', 'gros']:
+            raise ValidationError(
+                "Le type de prix doit être 'detail' ou 'gros'."
+            )
 
+        # Calcul du total
+        self.calculate_total()
+
+        # Sauvegarde
         super().save(*args, **kwargs)
 
-        self.sale.calculate_totals()
+        # Mise à jour des totaux de la vente parente
+        if self.sale:
+            self.sale.calculate_totals()
 
+    def get_product_price(self):
+        """
+        Retourne le prix du produit selon le type sélectionné
+        """
+        if self.price_type == 'gros':
+            return self.product.wholesale_price or self.product.selling_price
+        return self.product.selling_price
+
+    def get_price_type_display(self):
+        """
+        Retourne le libellé du type de prix
+        """
+        return dict(self.PRICE_TYPE_CHOICES).get(self.price_type, 'Prix de détail')
+
+    def to_dict(self):
+        """
+        Convertit la ligne en dictionnaire pour l'export
+        """
+        return {
+            'id': self.id,
+            'product_id': self.product.id,
+            'product_name': self.product.name,
+            'product_code': self.product.code,
+            'lot_number': self.lot.lot_number if self.lot else None,
+            'quantity': self.quantity,
+            'unit_price': float(self.unit_price),
+            'price_type': self.price_type,
+            'price_type_display': self.get_price_type_display(),
+            'discount': float(self.discount),
+            'tax_rate': float(self.tax_rate),
+            'subtotal': float(self.subtotal),
+            'total': float(self.total),
+            'notes': self.notes,
+        }
 
 # ============================================================
 # FACTURE
 # ============================================================
+
 
 class Facture(models.Model):
 
@@ -1961,6 +2125,7 @@ class Paiement(models.Model):
 # ============================================================
 # AVOIR
 # ============================================================
+
 
 class Avoir(models.Model):
 

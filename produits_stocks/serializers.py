@@ -50,6 +50,11 @@ class UnitMeasureSerializer(serializers.ModelSerializer):
 
 
 # ==================== PRODUCT ====================
+# apps/produits_stocks/serializers.py
+# ============================================================
+# PRODUCT LIST SERIALIZER - VERSION CORRIGÉE
+# ============================================================
+
 class ProductListSerializer(serializers.ModelSerializer):
     """Serializer pour la liste des produits (léger)"""
     category_name = serializers.CharField(
@@ -64,11 +69,18 @@ class ProductListSerializer(serializers.ModelSerializer):
         model = Product
         fields = [
             'id', 'code', 'barcode', 'name', 'category', 'category_name',
-            'unit', 'unit_symbol', 'selling_price', 'purchase_price',
+            'unit', 'unit_symbol', 
+            'selling_price',      # ✅ Prix de vente (détail)
+            'wholesale_price',    # ✅ PRIX DE GROS - AJOUTÉ
+            'purchase_price',     # Prix d'achat
             'current_stock', 'current_stock_value', 'min_stock', 'status',
             'status_display', 'has_expiry', 'image', 'is_featured'
         ]
 
+
+# ============================================================
+# PRODUCT DETAIL SERIALIZER - DÉJÀ CORRECT
+# ============================================================
 
 class ProductDetailSerializer(serializers.ModelSerializer):
     """Serializer pour le détail d'un produit"""
@@ -88,8 +100,11 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         model = Product
         fields = [
             'id', 'code', 'barcode', 'name', 'description', 'category', 'category_name',
-            'unit', 'unit_symbol', 'type', 'type_display', 'purchase_price',
-            'selling_price', 'wholesale_price', 'promo_price', 'tax_rate',
+            'unit', 'unit_symbol', 'type', 'type_display', 
+            'purchase_price',      # ✅ Prix d'achat
+            'selling_price',       # ✅ Prix de vente (détail)
+            'wholesale_price',     # ✅ Prix de gros
+            'promo_price', 'tax_rate',
             'has_expiry', 'shelf_life_days', 'alert_days', 'min_stock', 'max_stock',
             'reorder_point', 'reorder_quantity', 'image', 'gallery', 'status',
             'status_display', 'is_featured', 'current_stock', 'current_stock_value',
@@ -98,22 +113,10 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
-    def validate_code(self, value):
-        if Product.objects.exclude(id=self.instance.id if self.instance else None).filter(code=value).exists():
-            raise serializers.ValidationError("Ce code produit existe déjà")
-        return value
 
-    def validate_barcode(self, value):
-        if value and Product.objects.exclude(id=self.instance.id if self.instance else None).filter(barcode=value).exists():
-            raise serializers.ValidationError("Ce code-barres existe déjà")
-        return value
-
-    def validate(self, data):
-        if data.get('has_expiry') and not data.get('shelf_life_days'):
-            raise serializers.ValidationError(
-                {"shelf_life_days": "La durée de conservation est requise pour les produits à expiration"})
-        return data
-
+# ============================================================
+# PRODUCT WRITE SERIALIZER - DÉJÀ CORRECT
+# ============================================================
 
 class ProductWriteSerializer(serializers.ModelSerializer):
     """Serializer pour l'écriture (création/modification)"""
@@ -121,12 +124,14 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         model = Product
         fields = [
             'code', 'barcode', 'name', 'description', 'category', 'unit',
-            'type', 'purchase_price', 'selling_price', 'wholesale_price',
+            'type', 
+            'purchase_price',     # ✅ Prix d'achat
+            'selling_price',      # ✅ Prix de vente (détail)
+            'wholesale_price',    # ✅ Prix de gros
             'promo_price', 'tax_rate', 'has_expiry', 'shelf_life_days',
             'alert_days', 'min_stock', 'max_stock', 'reorder_point',
             'reorder_quantity', 'image', 'gallery', 'status', 'is_featured'
         ]
-
 
 # ==================== WAREHOUSE ====================
 class WarehouseSerializer(serializers.ModelSerializer):

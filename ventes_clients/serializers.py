@@ -1,4 +1,6 @@
 # apps/ventes_clients/serializers.py
+from produits_stocks.models import Product
+from .models import LigneVente
 from rest_framework import serializers
 from django.db import transaction
 from django.db.models import Sum
@@ -287,38 +289,99 @@ class DevisStatusUpdateSerializer(serializers.Serializer):
 
 
 # ==================== LIGNE VENTE ====================
+# apps/ventes_clients/serializers.py
+
 class LigneVenteSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_code = serializers.CharField(source='product.code', read_only=True)
     lot_number = serializers.CharField(source='lot.lot_number', read_only=True)
+    price_type_display = serializers.CharField(
+        source='get_price_type_display',
+        read_only=True
+    )
+    subtotal = serializers.ReadOnlyField()
+    tax_amount = serializers.ReadOnlyField()
+    total_without_tax = serializers.ReadOnlyField()
 
     class Meta:
         model = LigneVente
         fields = [
             'id', 'product', 'product_name', 'product_code',
-            'lot', 'lot_number', 'quantity', 'unit_price',
-            'discount', 'tax_rate', 'total', 'notes'
+            'lot', 'lot_number',
+            'quantity', 'unit_price',
+            'price_type', 'price_type_display',  # 🆕
+            'discount', 'tax_rate',
+            'subtotal', 'tax_amount', 'total_without_tax',
+            'total', 'notes'
         ]
         read_only_fields = ['id', 'total']
 
 
 class LigneVenteCreateSerializer(serializers.ModelSerializer):
+    """
+    Sérialiseur pour créer une ligne de vente avec choix du prix (détail ou gros)
+    """
+    # Nouveau champ pour le type de prix
+    price_type = serializers.ChoiceField(
+        choices=[
+            ('detail', 'Prix de détail'),
+            ('gros', 'Prix de gros'),
+        ],
+        default='detail',
+        write_only=True,
+        required=False
+    )
+
     class Meta:
         model = LigneVente
-        fields = ['product', 'lot', 'quantity',
-                  'unit_price', 'discount', 'tax_rate', 'notes']
+        fields = [
+            'product', 'lot', 'quantity', 'unit_price',
+            'discount', 'tax_rate', 'notes', 'price_type'
+        ]
 
     def validate_quantity(self, value):
         if value <= 0:
             raise serializers.ValidationError(
-                "La quantité doit être supérieure à 0")
+                "La quantité doit être supérieure à 0"
+            )
         return value
 
     def validate_unit_price(self, value):
         if value <= 0:
             raise serializers.ValidationError(
-                "Le prix unitaire doit être supérieur à 0")
+                "Le prix unitaire doit être supérieur à 0"
+            )
         return value
+
+    def validate(self, data):
+        """
+        Validation : si price_type est 'gros', s'assurer que le produit a un prix de gros
+        """
+        product_id = data.get('product')
+        price_type = data.get('price_type', 'detail')
+
+        if product_id:
+            try:
+                product = Product.objects.get(
+                    id=product_id.id if hasattr(product_id, 'id') else product_id)
+
+                # Si le type est 'gros' mais que le produit n'a pas de prix de gros
+                if price_type == 'gros' and not product.wholesale_price:
+                    raise serializers.ValidationError(
+                        f"Le produit {product.name} n'a pas de prix de gros défini."
+                    )
+
+                # Si l'utilisateur n'a pas fourni de unit_price, on le calcule automatiquement
+                if not data.get('unit_price') or data.get('unit_price') == 0:
+                    if price_type == 'gros':
+                        data['unit_price'] = product.wholesale_price or product.selling_price
+                    else:
+                        data['unit_price'] = product.selling_price
+
+            except Product.DoesNotExist:
+                raise serializers.ValidationError("Produit non trouvé")
+
+        return data
 
 
 # ==================== VENTE ====================
@@ -426,6 +489,9 @@ class VenteDetailSerializer(serializers.ModelSerializer):
 
 
 class VenteCreateSerializer(serializers.ModelSerializer):
+    """
+    Sérialiseur pour créer une vente avec gestion du type de prix
+    """
     lines = LigneVenteCreateSerializer(many=True)
 
     class Meta:
@@ -440,13 +506,15 @@ class VenteCreateSerializer(serializers.ModelSerializer):
     def validate_payment_due_date(self, value):
         if value < date.today():
             raise serializers.ValidationError(
-                "La date d'échéance ne peut pas être dans le passé")
+                "La date d'échéance ne peut pas être dans le passé"
+            )
         return value
 
     def validate_lines(self, value):
         if not value:
             raise serializers.ValidationError("Au moins un produit est requis")
 
+        # Vérification des doublons
         product_ids = []
         for line in value:
             product_id = line.get('product')
@@ -471,7 +539,7 @@ class VenteCreateSerializer(serializers.ModelSerializer):
         lines_data = validated_data.pop('lines')
         client = validated_data.get('client')
 
-        # ✅ CORRECTION ICI : year est un attribut, pas une méthode
+        # Génération du numéro de facture
         last_vente = Vente.objects.order_by('-id').first()
         if last_vente and last_vente.invoice_number:
             try:
@@ -482,6 +550,7 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             num = 1
         invoice_number = f"INV-{date.today().year}-{num:04d}"
 
+        # Création de la vente
         vente = Vente.objects.create(
             invoice_number=invoice_number,
             client_name=client.name if client else '',
@@ -491,9 +560,13 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             **validated_data
         )
 
+        # Création des lignes
         for line_data in lines_data:
+            # Supprimer price_type car il n'existe pas dans le modèle LigneVente
+            line_data.pop('price_type', None)
             LigneVente.objects.create(sale=vente, **line_data)
 
+        # Calcul des totaux
         vente.calculate_totals()
         vente.generate_qr_code()
         vente.save()
