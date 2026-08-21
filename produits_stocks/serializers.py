@@ -69,7 +69,7 @@ class ProductListSerializer(serializers.ModelSerializer):
         model = Product
         fields = [
             'id', 'code', 'barcode', 'name', 'category', 'category_name',
-            'unit', 'unit_symbol', 
+            'unit', 'unit_symbol',
             'selling_price',      # ✅ Prix de vente (détail)
             'wholesale_price',    # ✅ PRIX DE GROS - AJOUTÉ
             'purchase_price',     # Prix d'achat
@@ -100,7 +100,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         model = Product
         fields = [
             'id', 'code', 'barcode', 'name', 'description', 'category', 'category_name',
-            'unit', 'unit_symbol', 'type', 'type_display', 
+            'unit', 'unit_symbol', 'type', 'type_display',
             'purchase_price',      # ✅ Prix d'achat
             'selling_price',       # ✅ Prix de vente (détail)
             'wholesale_price',     # ✅ Prix de gros
@@ -124,7 +124,7 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         model = Product
         fields = [
             'code', 'barcode', 'name', 'description', 'category', 'unit',
-            'type', 
+            'type',
             'purchase_price',     # ✅ Prix d'achat
             'selling_price',      # ✅ Prix de vente (détail)
             'wholesale_price',    # ✅ Prix de gros
@@ -134,6 +134,8 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         ]
 
 # ==================== WAREHOUSE ====================
+
+
 class WarehouseSerializer(serializers.ModelSerializer):
     occupancy_rate = serializers.ReadOnlyField()
 

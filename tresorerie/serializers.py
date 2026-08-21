@@ -402,72 +402,98 @@ class TresorerieJournaliereSerializer(serializers.ModelSerializer):
 # apps/tresorerie/serializers.py
 # Modifier la méthode to_representation de TresorerieDashboardSerializer
 
+# apps/tresorerie/serializers.py - Partie TresorerieDashboardSerializer COMPLETE
+
 class TresorerieDashboardSerializer(serializers.Serializer):
     """
     Sérialiseur pour les statistiques du tableau de bord de trésorerie
     """
     total_soldes_caisses = serializers.DecimalField(
-        max_digits=15, decimal_places=2)
+        max_digits=15, decimal_places=2, required=False, default=0
+    )
     total_soldes_comptes = serializers.DecimalField(
-        max_digits=15, decimal_places=2)
-    total_global = serializers.DecimalField(max_digits=15, decimal_places=2)
-    nb_caisses = serializers.IntegerField()
-    nb_comptes = serializers.IntegerField()
-    mouvements_recents = serializers.ListField(child=serializers.DictField())
+        max_digits=15, decimal_places=2, required=False, default=0
+    )
+    total_global = serializers.DecimalField(
+        max_digits=15, decimal_places=2, required=False, default=0
+    )
+    nb_caisses = serializers.IntegerField(required=False, default=0)
+    nb_comptes = serializers.IntegerField(required=False, default=0)
+    mouvements_recents = serializers.ListField(
+        child=serializers.DictField(), required=False, default=list
+    )
     entree_total_jour = serializers.DecimalField(
-        max_digits=15, decimal_places=2)
+        max_digits=15, decimal_places=2, required=False, default=0
+    )
     sortie_total_jour = serializers.DecimalField(
-        max_digits=15, decimal_places=2)
-    soldes_par_entrepot = serializers.ListField(child=serializers.DictField())
+        max_digits=15, decimal_places=2, required=False, default=0
+    )
+    soldes_par_entrepot = serializers.ListField(
+        child=serializers.DictField(), required=False, default=list
+    )
+
+    # Champs formatés (en lecture seule)
+    total_soldes_caisses_formate = serializers.SerializerMethodField()
+    total_soldes_comptes_formate = serializers.SerializerMethodField()
+    total_global_formate = serializers.SerializerMethodField()
+    entree_total_jour_formate = serializers.SerializerMethodField()
+    sortie_total_jour_formate = serializers.SerializerMethodField()
+
+    def get_total_soldes_caisses_formate(self, obj):
+        return self._safe_format(obj.get('total_soldes_caisses', 0))
+
+    def get_total_soldes_comptes_formate(self, obj):
+        return self._safe_format(obj.get('total_soldes_comptes', 0))
+
+    def get_total_global_formate(self, obj):
+        return self._safe_format(obj.get('total_global', 0))
+
+    def get_entree_total_jour_formate(self, obj):
+        return self._safe_format(obj.get('entree_total_jour', 0))
+
+    def get_sortie_total_jour_formate(self, obj):
+        return self._safe_format(obj.get('sortie_total_jour', 0))
+
+    def _safe_format(self, value, default=0):
+        """
+        Formate une valeur en chaîne de caractères avec séparateurs de milliers
+        """
+        try:
+            if value is None:
+                return f"{default:,.0f} FCFA"
+            if isinstance(value, str):
+                value = value.replace(',', '').replace(' ', '')
+            val = float(value)
+            return f"{val:,.0f} FCFA"
+        except (ValueError, TypeError, AttributeError):
+            return f"{default:,.0f} FCFA"
 
     def to_representation(self, instance):
-        # ✅ CORRECTION : Vérifier que les valeurs sont des nombres avant de formater
-        data = super().to_representation(instance)
+        """
+        Convertit l'instance en dictionnaire avec des valeurs formatées
+        """
+        # S'assurer que toutes les clés existent
+        default_data = {
+            'total_soldes_caisses': 0,
+            'total_soldes_comptes': 0,
+            'total_global': 0,
+            'nb_caisses': 0,
+            'nb_comptes': 0,
+            'mouvements_recents': [],
+            'entree_total_jour': 0,
+            'sortie_total_jour': 0,
+            'soldes_par_entrepot': [],
+        }
 
-        # Convertir les valeurs en Decimal si nécessaire
-        def safe_format(value, default=0):
-            try:
-                if isinstance(value, str):
-                    # Si c'est une chaîne, essayer de la convertir en nombre
-                    value = float(value.replace(',', '')
-                                  ) if ',' in value else float(value)
-                return f"{value:,.0f} FCFA"
-            except (ValueError, TypeError):
-                return f"{default:,.0f} FCFA"
+        # Mettre à jour avec les données de l'instance
+        if isinstance(instance, dict):
+            default_data.update(instance)
+        elif hasattr(instance, '__dict__'):
+            for key in default_data.keys():
+                if hasattr(instance, key):
+                    default_data[key] = getattr(instance, key)
 
-        if 'total_soldes_caisses' in data:
-            try:
-                val = float(data['total_soldes_caisses'])
-                data['total_soldes_caisses_formate'] = f"{val:,.0f} FCFA"
-            except (ValueError, TypeError):
-                data['total_soldes_caisses_formate'] = "0 FCFA"
-
-        if 'total_soldes_comptes' in data:
-            try:
-                val = float(data['total_soldes_comptes'])
-                data['total_soldes_comptes_formate'] = f"{val:,.0f} FCFA"
-            except (ValueError, TypeError):
-                data['total_soldes_comptes_formate'] = "0 FCFA"
-
-        if 'total_global' in data:
-            try:
-                val = float(data['total_global'])
-                data['total_global_formate'] = f"{val:,.0f} FCFA"
-            except (ValueError, TypeError):
-                data['total_global_formate'] = "0 FCFA"
-
-        if 'entree_total_jour' in data:
-            try:
-                val = float(data['entree_total_jour'])
-                data['entree_total_jour_formate'] = f"{val:,.0f} FCFA"
-            except (ValueError, TypeError):
-                data['entree_total_jour_formate'] = "0 FCFA"
-
-        if 'sortie_total_jour' in data:
-            try:
-                val = float(data['sortie_total_jour'])
-                data['sortie_total_jour_formate'] = f"{val:,.0f} FCFA"
-            except (ValueError, TypeError):
-                data['sortie_total_jour_formate'] = "0 FCFA"
+        # Appeler le parent pour avoir la représentation de base
+        data = super().to_representation(default_data)
 
         return data

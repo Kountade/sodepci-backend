@@ -675,39 +675,70 @@ class RapprochementBancaire(models.Model):
 # 7. TRÉSORERIE JOURNALIÈRE
 # ============================================================
 
+# apps/tresorerie/models.py - Partie TresorerieJournaliere COMPLETE
+
 class TresorerieJournaliere(models.Model):
     """Suivi journalier de la trésorerie"""
     date = models.DateField(unique=True, verbose_name="Date")
-    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT,
-                                  related_name='tresorerie_journaliere', verbose_name="Entrepôt/Magasin")
+    warehouse = models.ForeignKey(
+        Warehouse,
+        on_delete=models.PROTECT,
+        related_name='tresorerie_journaliere',
+        verbose_name="Entrepôt/Magasin"
+    )
     solde_ouverture = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Solde d'ouverture")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde d'ouverture"
+    )
     solde_fermeture = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Solde de fermeture")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde de fermeture"
+    )
     total_entrees = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Total entrées")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Total entrées"
+    )
     total_sorties = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Total sorties")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Total sorties"
+    )
     entrees_ventes = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Entrées ventes")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Entrées ventes"
+    )
     entrees_reglements = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Entrées règlements")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Entrées règlements"
+    )
     entrees_autres = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Entrées autres")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Entrées autres"
+    )
     sorties_achats = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Sorties achats")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Sorties achats"
+    )
     sorties_frais = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Sorties frais")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Sorties frais"
+    )
     sorties_salaires = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Sorties salaires")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Sorties salaires"
+    )
     sorties_autres = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Sorties autres")
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Sorties autres"
+    )
     nb_operations = models.IntegerField(
-        default=0, verbose_name="Nombre d'opérations")
+        default=0, verbose_name="Nombre d'opérations"
+    )
     nb_entrees = models.IntegerField(
-        default=0, verbose_name="Nombre d'entrées")
+        default=0, verbose_name="Nombre d'entrées"
+    )
     nb_sorties = models.IntegerField(
-        default=0, verbose_name="Nombre de sorties")
+        default=0, verbose_name="Nombre de sorties"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -723,3 +754,104 @@ class TresorerieJournaliere(models.Model):
     @property
     def variation(self):
         return self.solde_fermeture - self.solde_ouverture
+
+    def generer_journaliere(self, date_jour):
+        """
+        Génère ou met à jour la trésorerie journalière pour une date donnée
+        """
+        from django.db.models import Sum, Q
+        from decimal import Decimal
+        from datetime import timedelta
+
+        warehouse = self.warehouse
+
+        # Récupérer le solde d'ouverture (jour précédent)
+        jour_precedent = date_jour - timedelta(days=1)
+        precedent = TresorerieJournaliere.objects.filter(
+            date=jour_precedent,
+            warehouse=warehouse
+        ).first()
+
+        solde_ouverture = precedent.solde_fermeture if precedent else Decimal(
+            '0')
+
+        # Récupérer les mouvements du jour
+        mouvements = MouvementTresorerie.objects.filter(
+            warehouse=warehouse,
+            date_mouvement__date=date_jour,
+            status='effectue'
+        )
+
+        # Total des entrées
+        total_entrees = mouvements.filter(
+            type_mouvement='encaissement'
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        # Total des sorties
+        total_sorties = mouvements.filter(
+            type_mouvement='decaissement'
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        # Détail des entrées par source
+        entrees_ventes = mouvements.filter(
+            type_mouvement='encaissement',
+            source_type='vente'
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        entrees_reglements = mouvements.filter(
+            type_mouvement='encaissement',
+            source_type='paiement_client'
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        entrees_autres = mouvements.filter(
+            type_mouvement='encaissement'
+        ).exclude(
+            source_type__in=['vente', 'paiement_client']
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        # Détail des sorties par source
+        sorties_achats = mouvements.filter(
+            type_mouvement='decaissement',
+            source_type='achat'
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        sorties_frais = mouvements.filter(
+            type_mouvement='decaissement',
+            source_type='frais'
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        sorties_salaires = mouvements.filter(
+            type_mouvement='decaissement',
+            source_type='salaires'
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        sorties_autres = mouvements.filter(
+            type_mouvement='decaissement'
+        ).exclude(
+            source_type__in=['achat', 'frais', 'salaires']
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        # Nombre d'opérations
+        nb_entrees = mouvements.filter(type_mouvement='encaissement').count()
+        nb_sorties = mouvements.filter(type_mouvement='decaissement').count()
+        nb_operations = mouvements.count()
+
+        # Mettre à jour l'objet
+        self.solde_ouverture = solde_ouverture
+        self.total_entrees = total_entrees
+        self.total_sorties = total_sorties
+        self.entrees_ventes = entrees_ventes
+        self.entrees_reglements = entrees_reglements
+        self.entrees_autres = entrees_autres
+        self.sorties_achats = sorties_achats
+        self.sorties_frais = sorties_frais
+        self.sorties_salaires = sorties_salaires
+        self.sorties_autres = sorties_autres
+        self.nb_operations = nb_operations
+        self.nb_entrees = nb_entrees
+        self.nb_sorties = nb_sorties
+        self.solde_fermeture = solde_ouverture + total_entrees - total_sorties
+
+        self.save()
+
+        return self
