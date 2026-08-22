@@ -16,31 +16,14 @@ from produits_stocks.serializers import ProductListSerializer, LotListSerializer
 
 # ==================== CLIENT ====================
 class ClientSerializer(serializers.ModelSerializer):
-    full_address = serializers.ReadOnlyField()
-    total_purchases_display = serializers.SerializerMethodField()
-    credit_limit_display = serializers.SerializerMethodField()
-
     class Meta:
         model = Client
         fields = [
-            'id', 'code', 'name', 'commercial_name', 'type',
-            'contact_person', 'phone', 'mobile', 'email', 'website',
-            'address', 'city', 'country', 'postal_code',
-            'tax_id', 'registration_number',
-            'payment_terms', 'credit_limit', 'credit_limit_display',
-            'current_balance', 'rating', 'total_purchases',
-            'total_purchases_display', 'total_orders',
-            'statut', 'is_favorite', 'notes',
-            'created_at', 'updated_at', 'created_by', 'full_address'
+            'id', 'code', 'name', 'type', 'phone',
+            'address', 'statut', 'notes',
+            'created_at', 'updated_at', 'created_by'
         ]
-        read_only_fields = ['id', 'created_at',
-                            'updated_at', 'total_purchases', 'total_orders']
-
-    def get_total_purchases_display(self, obj):
-        return f"{obj.total_purchases:,.0f} FCFA" if obj.total_purchases else "0 FCFA"
-
-    def get_credit_limit_display(self, obj):
-        return f"{obj.credit_limit:,.0f} FCFA" if obj.credit_limit else "0 FCFA"
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_code(self, value):
         if Client.objects.exclude(id=self.instance.id if self.instance else None).filter(code=value).exists():
@@ -50,21 +33,13 @@ class ClientSerializer(serializers.ModelSerializer):
 
 class ClientListSerializer(serializers.ModelSerializer):
     """Serializer léger pour la liste des clients"""
-    total_purchases_display = serializers.SerializerMethodField()
-
     class Meta:
         model = Client
-        fields = [
-            'id', 'code', 'name', 'commercial_name', 'type',
-            'phone', 'email', 'city', 'statut', 'is_favorite',
-            'total_purchases', 'total_purchases_display', 'rating'
-        ]
-
-    def get_total_purchases_display(self, obj):
-        return f"{obj.total_purchases:,.0f} FCFA" if obj.total_purchases else "0 FCFA"
-
+        fields = ['id', 'code', 'name', 'type', 'phone', 'statut']
 
 # ==================== DEVIS ====================
+
+
 class LigneDevisSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_code = serializers.CharField(source='product.code', read_only=True)
@@ -488,6 +463,8 @@ class VenteDetailSerializer(serializers.ModelSerializer):
         return obj.devis_source.filter(status='converted').exists()
 
 
+# apps/ventes_clients/serializers.py
+
 class VenteCreateSerializer(serializers.ModelSerializer):
     """
     Sérialiseur pour créer une vente avec gestion du type de prix
@@ -550,13 +527,20 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             num = 1
         invoice_number = f"INV-{date.today().year}-{num:04d}"
 
+        # ✅ CORRECTION : Récupérer les données du client sans utiliser 'email'
+        client_name = client.name if client else ''
+        client_phone = client.phone if client else ''
+        client_address = client.address if client else ''
+        # email supprimé - on met une chaîne vide
+        client_email = ''
+
         # Création de la vente
         vente = Vente.objects.create(
             invoice_number=invoice_number,
-            client_name=client.name if client else '',
-            client_phone=client.phone if client else '',
-            client_email=client.email if client else '',
-            client_address=client.address if client else '',
+            client_name=client_name,
+            client_phone=client_phone,
+            client_email=client_email,
+            client_address=client_address,
             **validated_data
         )
 
@@ -572,6 +556,8 @@ class VenteCreateSerializer(serializers.ModelSerializer):
         vente.save()
 
         return vente
+
+# apps/ventes_clients/serializers.py
 
 
 class VenteUpdateSerializer(serializers.ModelSerializer):
@@ -618,6 +604,8 @@ class VenteUpdateSerializer(serializers.ModelSerializer):
         if lines_data is not None:
             instance.lines.all().delete()
             for line_data in lines_data:
+                # Supprimer price_type
+                line_data.pop('price_type', None)
                 LigneVente.objects.create(sale=instance, **line_data)
 
         instance.calculate_totals()

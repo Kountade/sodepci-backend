@@ -96,39 +96,40 @@ def generate_qr_image(data):
 # ============================================================
 # CLIENT
 # ============================================================
+# apps/ventes_clients/models.py
 
 class Client(models.Model):
-
+    """
+    Modèle Client ultra-simplifié avec seulement 7 champs essentiels
+    """
+    
     TYPE_CHOICES = (
         ("particulier", "Particulier"),
         ("entreprise", "Entreprise"),
         ("revendeur", "Revendeur"),
         ("grossiste", "Grossiste"),
     )
-
+    
     STATUT_CHOICES = (
         ("actif", "Actif"),
         ("inactif", "Inactif"),
         ("bloque", "Bloqué"),
     )
 
+    # 1. Code client (unique, obligatoire)
     code = models.CharField(
         max_length=50,
         unique=True,
         verbose_name="Code client"
     )
 
+    # 2. Nom / Raison sociale (obligatoire)
     name = models.CharField(
         max_length=200,
         verbose_name="Nom / Raison sociale"
     )
 
-    commercial_name = models.CharField(
-        max_length=200,
-        blank=True,
-        verbose_name="Nom commercial"
-    )
-
+    # 3. Type de client (optionnel, défaut "particulier")
     type = models.CharField(
         max_length=20,
         choices=TYPE_CHOICES,
@@ -136,114 +137,19 @@ class Client(models.Model):
         verbose_name="Type"
     )
 
-    contact_person = models.CharField(
-        max_length=100,
-        blank=True,
-        verbose_name="Personne de contact"
-    )
-
+    # 4. Téléphone (obligatoire)
     phone = models.CharField(
         max_length=20,
         verbose_name="Téléphone"
     )
 
-    mobile = models.CharField(
-        max_length=20,
-        blank=True,
-        verbose_name="Mobile"
-    )
-
-    email = models.EmailField(
-        blank=True,
-        verbose_name="Email"
-    )
-
-    website = models.URLField(
-        blank=True,
-        verbose_name="Site web"
-    )
-
+    # 5. Adresse (optionnel)
     address = models.TextField(
         blank=True,
         verbose_name="Adresse"
     )
 
-    city = models.CharField(
-        max_length=100,
-        blank=True,
-        verbose_name="Ville"
-    )
-
-    country = models.CharField(
-        max_length=100,
-        default="Sénégal",
-        verbose_name="Pays"
-    )
-
-    postal_code = models.CharField(
-        max_length=20,
-        blank=True,
-        verbose_name="Code postal"
-    )
-
-    tax_id = models.CharField(
-        max_length=50,
-        blank=True,
-        verbose_name="N° Identification fiscale"
-    )
-
-    registration_number = models.CharField(
-        max_length=50,
-        blank=True,
-        verbose_name="N° Registre de commerce"
-    )
-
-    payment_terms = models.CharField(
-        max_length=20,
-        choices=[
-            ("cash", "Comptant"),
-            ("15", "15 jours"),
-            ("30", "30 jours"),
-            ("45", "45 jours"),
-            ("60", "60 jours"),
-        ],
-        default="cash",
-        verbose_name="Délai de paiement"
-    )
-
-    credit_limit = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal("0.00"),
-        verbose_name="Limite de crédit"
-    )
-
-    current_balance = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal("0.00"),
-        verbose_name="Solde actuel"
-    )
-
-    rating = models.DecimalField(
-        max_digits=3,
-        decimal_places=2,
-        default=Decimal("0.00"),
-        verbose_name="Note"
-    )
-
-    total_purchases = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=Decimal("0.00"),
-        verbose_name="Total achats"
-    )
-
-    total_orders = models.PositiveIntegerField(
-        default=0,
-        verbose_name="Nombre de commandes"
-    )
-
+    # 6. Statut (optionnel, défaut "actif")
     statut = models.CharField(
         max_length=20,
         choices=STATUT_CHOICES,
@@ -251,24 +157,15 @@ class Client(models.Model):
         verbose_name="Statut"
     )
 
-    is_favorite = models.BooleanField(
-        default=False,
-        verbose_name="Client favori"
-    )
-
+    # 7. Notes (optionnel)
     notes = models.TextField(
         blank=True,
         verbose_name="Notes"
     )
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
-
-    updated_at = models.DateTimeField(
-        auto_now=True
-    )
-
+    # Champs automatiques (non comptés dans les 7)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(
         CustomUser,
         on_delete=models.SET_NULL,
@@ -285,19 +182,6 @@ class Client(models.Model):
 
     def __str__(self):
         return f"{self.code} - {self.name}"
-
-    @property
-    def full_address(self):
-        parts = [
-            self.address,
-            self.city,
-            self.country
-        ]
-
-        return ", ".join(
-            part for part in parts if part
-        )
-
 
 # ============================================================
 # DEVIS

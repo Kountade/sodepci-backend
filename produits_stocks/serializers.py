@@ -2,6 +2,7 @@
 from .models import Product, Warehouse, Stock
 from rest_framework import serializers
 from django.db import transaction
+from django.utils import timezone  # <-- IMPORTANT
 from datetime import date, timedelta
 from .models import (
     Category, UnitMeasure, Product, Warehouse, Lot,
@@ -549,3 +550,58 @@ class TransferResponseSerializer(serializers.Serializer):
     """
     message = serializers.CharField()
     movements = TransferItemResponseSerializer(many=True)
+
+
+# apps/produits_stocks/serializers.py
+
+class ManualStockAddSerializer(serializers.Serializer):
+    """
+    Sérialiseur pour l'ajout manuel de stock (sans commande)
+    """
+    product_id = serializers.IntegerField()
+    warehouse_id = serializers.IntegerField()
+    quantity = serializers.IntegerField(min_value=1)
+    lot_number = serializers.CharField(
+        max_length=100, required=False, allow_blank=True)
+    batch_number = serializers.CharField(
+        max_length=100, required=False, allow_blank=True)
+    expiry_date = serializers.DateField(required=False, allow_null=True)
+    manufacturing_date = serializers.DateField(required=False, allow_null=True)
+    purchase_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False)
+    selling_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    reason = serializers.CharField(
+        required=False, allow_blank=True, default="Ajout manuel")
+
+    def validate(self, data):
+        # Vérifier que le produit existe
+        try:
+            product = Product.objects.get(id=data['product_id'])
+        except Product.DoesNotExist:
+            raise serializers.ValidationError(
+                {"product_id": "Produit non trouvé"})
+
+        # Vérifier que l'entrepôt existe
+        try:
+            warehouse = Warehouse.objects.get(id=data['warehouse_id'])
+        except Warehouse.DoesNotExist:
+            raise serializers.ValidationError(
+                {"warehouse_id": "Entrepôt non trouvé"})
+
+        # Si une date d'expiration est fournie, vérifier qu'elle n'est pas dans le passé
+        if data.get('expiry_date') and data['expiry_date'] < date.today():
+            raise serializers.ValidationError(
+                {"expiry_date": "La date d'expiration ne peut pas être dans le passé"})
+
+        # Si le produit a une expiration, la date est obligatoire
+        if product.has_expiry and not data.get('expiry_date'):
+            raise serializers.ValidationError(
+                {"expiry_date": "Ce produit a une date d'expiration obligatoire"})
+
+        # Générer un numéro de lot automatique si non fourni
+        if not data.get('lot_number'):
+            data['lot_number'] = f"MAN-{timezone.now().strftime('%Y%m%d%H%M%S')}-{data['product_id']}"
+
+        return data
