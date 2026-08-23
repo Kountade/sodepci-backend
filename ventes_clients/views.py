@@ -56,11 +56,6 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # FONCTION UTILITAIRE POUR CRÉER UN MOUVEMENT DE PAIEMENT
 # ============================================================
-# apps/ventes_clients/views.py
-# ============================================================
-# FONCTION UTILITAIRE POUR CRÉER UN MOUVEMENT DE PAIEMENT - VERSION CORRIGÉE
-# ============================================================
-
 def creer_mouvement_paiement_manuel(paiement, facture, request_user):
     """
     Crée un mouvement de trésorerie pour un paiement.
@@ -193,11 +188,11 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
         import traceback
         traceback.print_exc()
         return None
+
+
 # ============================================================
 # CLIENT VIEWSET
 # ============================================================
-
-
 class ClientViewSet(viewsets.ModelViewSet):
     queryset = Client.objects.all()
     permission_classes = [permissions.IsAuthenticated]
@@ -269,7 +264,6 @@ class ClientViewSet(viewsets.ModelViewSet):
 # ============================================================
 # DEVIS VIEWSET
 # ============================================================
-
 class DevisViewSet(viewsets.ModelViewSet):
     queryset = Devis.objects.all()
     permission_classes = [permissions.IsAuthenticated]
@@ -383,31 +377,8 @@ class DevisViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# VENTE VIEWSET
-# ============================================================
-# apps/ventes_clients/views.py
-# ============================================================
-# VENTE VIEWSET - COMPLET AVEC TOUTES LES FONCTIONNALITÉS
-# ============================================================
-
-# apps/ventes_clients/views.py
-# ============================================================
-# VENTE VIEWSET - COMPLET AVEC TOUTES LES FONCTIONNALITÉS
-# ============================================================
-
-# apps/ventes_clients/views.py
-# ============================================================
 # VENTE VIEWSET - COMPLET CORRIGÉ
 # ============================================================
-
-
-logger = logging.getLogger(__name__)
-
-
-# ============================================================
-# VENTE VIEWSET - COMPLET
-# ============================================================
-
 class VenteViewSet(viewsets.ModelViewSet):
     queryset = Vente.objects.all()
     permission_classes = [permissions.IsAuthenticated]
@@ -467,7 +438,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
 
     # ================================================================
-    # 1. CONFIRMER UNE VENTE - CORRIGÉ
+    # 1. CONFIRMER UNE VENTE
     # ================================================================
     @action(detail=True, methods=['post'])
     def confirm(self, request, pk=None):
@@ -574,7 +545,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 logger.error(f"Erreur création mouvement trésorerie: {e}")
 
             # 5. Génération de la facture
-            # ✅ IMPORT CORRECT à l'intérieur de la fonction
             from .models import Facture
             from datetime import date
 
@@ -853,26 +823,144 @@ class VenteViewSet(viewsets.ModelViewSet):
             )
 
     # ================================================================
-    # 4. MARQUER COMME PAYÉ
+    # 4. MARQUER COMME PAYÉ (CORRIGÉ)
     # ================================================================
     @action(detail=True, methods=['post'])
     def mark_paid(self, request, pk=None):
+        """
+        Marque la vente comme payée en créant automatiquement un paiement
+        pour le montant restant dû.
+        """
+        from decimal import Decimal
+        from django.db import transaction
+        from django.db.models import Sum
+
         vente = self.get_object()
 
+        # Vérifier que la vente est dans un état permettant le paiement
         if vente.status not in ['confirmed', 'delivered']:
             return Response(
-                {"error": "Seule une vente confirmée ou livrée peut être marquée comme payée"},
+                {"error": "Seule une vente confirmée ou livrée peut être marquée comme payée."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         amount_due = vente.amount_due
         if amount_due <= 0:
             return Response(
-                {"error": "Cette vente est déjà entièrement payée"},
+                {"error": "Cette vente est déjà entièrement payée."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        return self.register_payment(request, pk)
+        # S'assurer qu'une facture existe pour cette vente
+        facture = vente.invoices.first()
+        if not facture:
+            # Générer automatiquement la facture (méthode existante dans le modèle Vente)
+            facture = vente.generate_invoice()
+            if not facture:
+                return Response(
+                    {"error": "Impossible de générer une facture pour cette vente."},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+        with transaction.atomic():
+            # 1. Créer le paiement
+            paiement = Paiement.objects.create(
+                facture=facture,
+                amount=amount_due,
+                method='cash',          # Méthode par défaut, vous pouvez la modifier
+                reference='',           # Laissez vide ou générez un numéro
+                notes='Paiement automatique (marquer comme payé)',
+                received_by=request.user
+            )
+            logger.info(f"✅ Paiement automatique créé : ID {paiement.id}")
+
+            # 2. Mettre à jour la facture
+            total_paid_facture = facture.paiements.aggregate(
+                total=Sum('amount')
+            )['total'] or Decimal('0')
+            facture.amount_paid = total_paid_facture
+            facture.status = 'paid' if total_paid_facture >= facture.total else 'partial'
+            facture.save()
+
+            # 3. Mettre à jour la vente
+            vente.amount_paid += amount_due
+            vente.amount_due = vente.total - vente.amount_paid
+            if vente.amount_due <= 0:
+                vente.payment_status = 'paid'
+                vente.status = 'paid'       # Optionnel : passer le statut global à payé
+            elif vente.amount_paid > 0:
+                vente.payment_status = 'partial'
+            else:
+                vente.payment_status = 'pending'
+            vente.save()
+
+            # 4. Créer le mouvement de trésorerie (encaissement)
+            try:
+                from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
+
+                # Choisir une caisse par défaut (ou un compte) associée à l'entrepôt
+                caisse = Caisse.objects.filter(
+                    warehouse=vente.warehouse,
+                    is_default=True
+                ).first()
+
+                if not caisse:
+                    # Si aucune caisse par défaut, prendre la première active
+                    caisse = Caisse.objects.filter(
+                        warehouse=vente.warehouse,
+                        is_active=True
+                    ).first()
+
+                if caisse:
+                    # Vérifier si un mouvement existe déjà
+                    mouvement_existant = MouvementTresorerie.objects.filter(
+                        source_type='paiement_client',
+                        source_id=paiement.id
+                    ).first()
+                    if not mouvement_existant:
+                        mouvement = MouvementTresorerie.objects.create(
+                            type_mouvement='encaissement',
+                            warehouse=vente.warehouse,
+                            source_type='paiement_client',
+                            source_id=paiement.id,
+                            source_reference=paiement.reference or f"PAY-{paiement.id}",
+                            montant=paiement.amount,
+                            mode_paiement=paiement.method,
+                            caisse=caisse,
+                            compte_bancaire=None,
+                            date_mouvement=paiement.payment_date,
+                            date_valeur=paiement.payment_date.date(),
+                            status='effectue',
+                            libelle=f"Paiement vente {vente.invoice_number} - {vente.client_name}",
+                            created_by=request.user
+                        )
+                        # Mettre à jour le solde de la caisse
+                        caisse.solde_actuel += paiement.amount
+                        caisse.save(update_fields=[
+                                    'solde_actuel', 'updated_at'])
+                        logger.info(
+                            f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
+                    else:
+                        logger.info(
+                            f"Mouvement déjà existant pour le paiement {paiement.id}")
+                else:
+                    logger.warning("Aucune caisse trouvée pour l'entrepôt.")
+            except ImportError:
+                logger.warning("Module trésorerie non disponible")
+            except Exception as e:
+                logger.error(
+                    f"Erreur lors de la création du mouvement trésorerie : {e}")
+
+        # 5. Réponse de succès
+        return Response({
+            'status': 'success',
+            'message': 'La vente a été marquée comme payée.',
+            'amount_paid': vente.amount_paid,
+            'amount_due': vente.amount_due,
+            'payment_status': vente.payment_status,
+            'facture_status': facture.status,
+            'invoice_number': vente.invoice_number
+        }, status=status.HTTP_200_OK)
 
     # ================================================================
     # 5. ANNULER UNE VENTE
@@ -1073,10 +1161,10 @@ class VenteViewSet(viewsets.ModelViewSet):
             'by_payment_status': by_payment_status
         })
 
+
+# ============================================================
 # FACTURE VIEWSET
 # ============================================================
-
-
 class FactureViewSet(viewsets.ModelViewSet):
     queryset = Facture.objects.all()
     permission_classes = [permissions.IsAuthenticated]
@@ -1418,7 +1506,6 @@ class FactureViewSet(viewsets.ModelViewSet):
 # ============================================================
 # PAIEMENT VIEWSET
 # ============================================================
-
 class PaiementViewSet(viewsets.ModelViewSet):
     queryset = Paiement.objects.all()
     serializer_class = PaiementSerializer
@@ -1458,7 +1545,6 @@ class PaiementViewSet(viewsets.ModelViewSet):
 # ============================================================
 # AVOIR VIEWSET
 # ============================================================
-
 class AvoirViewSet(viewsets.ModelViewSet):
     queryset = Avoir.objects.all()
     permission_classes = [permissions.IsAuthenticated]
@@ -1482,7 +1568,6 @@ class AvoirViewSet(viewsets.ModelViewSet):
 # ============================================================
 # TAXE VIEWSET
 # ============================================================
-
 class TaxeViewSet(viewsets.ModelViewSet):
     queryset = Taxe.objects.all()
     serializer_class = TaxeSerializer
@@ -1492,7 +1577,6 @@ class TaxeViewSet(viewsets.ModelViewSet):
 # ============================================================
 # REMISE VIEWSET
 # ============================================================
-
 class RemiseViewSet(viewsets.ModelViewSet):
     queryset = Remise.objects.all()
     serializer_class = RemiseSerializer
@@ -1509,7 +1593,6 @@ class RemiseViewSet(viewsets.ModelViewSet):
 # ============================================================
 # DASHBOARD STATS VIEWSET
 # ============================================================
-
 class SalesDashboardStatsViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
