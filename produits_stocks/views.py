@@ -635,12 +635,28 @@ class InventoryViewSet(viewsets.ModelViewSet):
 
 
 # ==================== TRANSFER VIEWSET ====================
+# apps/produits_stocks/views.py (extrait)
+
+import uuid  # <-- AJOUT
+from django.db import transaction  # <-- AJOUT (si pas déjà importé)
+from rest_framework import viewsets, status, permissions
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django.utils import timezone
+from .models import Warehouse, Product, Stock, Lot, StockMovement
+from .serializers import TransferRequestSerializer, TransferResponseSerializer
+from users.permissions import IsGestionnaire
+
 class TransferViewSet(viewsets.ViewSet):
+    """
+    ViewSet pour les transferts de stock entre entrepôts.
+    """
     permission_classes = [permissions.IsAuthenticated, IsGestionnaire]
 
     def create(self, request):
-        from .serializers import TransferRequestSerializer, TransferResponseSerializer
-
+        """
+        Crée un transfert de stock entre deux entrepôts.
+        """
         serializer = TransferRequestSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -652,97 +668,136 @@ class TransferViewSet(viewsets.ViewSet):
         reason = data.get('reason', '')
         notes = data.get('notes', '')
 
-        from_warehouse = Warehouse.objects.get(id=from_warehouse_id)
-        to_warehouse = Warehouse.objects.get(id=to_warehouse_id)
+        try:
+            from_warehouse = Warehouse.objects.get(id=from_warehouse_id)
+            to_warehouse = Warehouse.objects.get(id=to_warehouse_id)
+        except Warehouse.DoesNotExist:
+            return Response(
+                {"error": "Entrepôt source ou destination introuvable."},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         movements_created = []
 
-        for item in items:
-            product_id = item['product_id']
-            quantity = item['quantity']
-            product = Product.objects.get(id=product_id)
+        # Transaction atomique pour garantir la cohérence
+        with transaction.atomic():
+            for item in items:
+                product_id = item['product_id']
+                quantity = item['quantity']
+                try:
+                    product = Product.objects.get(id=product_id)
+                except Product.DoesNotExist:
+                    return Response(
+                        {"error": f"Produit {product_id} introuvable."},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
 
-            stock_source = Stock.objects.get(
-                product=product, warehouse=from_warehouse)
-            success, lots_used = stock_source.consume_stock(quantity)
-            if not success:
-                return Response(
-                    {"error": f"Impossible de consommer le stock pour {product.name}."},
-                    status=status.HTTP_400_BAD_REQUEST
+                try:
+                    stock_source = Stock.objects.get(
+                        product=product, warehouse=from_warehouse
+                    )
+                except Stock.DoesNotExist:
+                    return Response(
+                        {"error": f"Le produit {product.name} n'a pas de stock dans l'entrepôt source."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Consommer le stock source (FIFO)
+                success, lots_used = stock_source.consume_stock(quantity)
+                if not success:
+                    return Response(
+                        {"error": f"Impossible de consommer le stock pour {product.name}."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Numéro de référence unique pour ce transfert
+                reference_number = f"TRANSF-{timezone.now().strftime('%Y%m%d%H%M%S')}"
+
+                # Créer les mouvements de sortie pour chaque lot utilisé
+                for lot_data in lots_used:
+                    lot = lot_data['lot']
+                    qty = lot_data['quantity']
+                    StockMovement.objects.create(
+                        product=product,
+                        lot=lot,
+                        from_warehouse=from_warehouse,
+                        to_warehouse=to_warehouse,
+                        movement_type='transfer_out',
+                        quantity=qty,
+                        reason=reason,
+                        notes=notes,
+                        created_by=request.user,
+                        reference_number=reference_number
+                    )
+
+                # Créer un nouveau lot dans l'entrepôt destination pour chaque lot source
+                for lot_data in lots_used:
+                    source_lot = lot_data['lot']
+                    qty = lot_data['quantity']
+
+                    # GÉNÉRATION D'UN LOT_NUMBER UNIQUE
+                    # Utilisation d'un suffixe aléatoire pour éviter les conflits
+                    unique_suffix = uuid.uuid4().hex[:8]
+                    new_lot_number = f"{source_lot.lot_number}-TRANSF-{unique_suffix}"
+
+                    # Créer le nouveau lot
+                    new_lot = Lot.objects.create(
+                        product=product,
+                        warehouse=to_warehouse,
+                        lot_number=new_lot_number,  # <--- CORRECTION ICI
+                        batch_number=source_lot.batch_number,
+                        barcode=source_lot.barcode,
+                        initial_quantity=qty,
+                        current_quantity=qty,
+                        reserved_quantity=0,
+                        unit=source_lot.unit,
+                        manufacturing_date=source_lot.manufacturing_date,
+                        expiry_date=source_lot.expiry_date,
+                        purchase_price=source_lot.purchase_price,
+                        selling_price=source_lot.selling_price,
+                        status='good',
+                        created_by=request.user,
+                        notes=f"Transfert depuis {from_warehouse.name} - {notes}"
+                    )
+
+                    # Mouvement d'entrée pour le nouveau lot
+                    StockMovement.objects.create(
+                        product=product,
+                        lot=new_lot,
+                        from_warehouse=from_warehouse,
+                        to_warehouse=to_warehouse,
+                        movement_type='transfer_in',
+                        quantity=qty,
+                        reason=reason,
+                        notes=notes,
+                        created_by=request.user,
+                        reference_number=reference_number
+                    )
+
+                # Mettre à jour les quantités des stocks (source et destination)
+                stock_source.update_quantity()
+                stock_dest, _ = Stock.objects.get_or_create(
+                    product=product, warehouse=to_warehouse
                 )
+                stock_dest.update_quantity()
 
-            reference_number = f"TRANSF-{timezone.now().strftime('%Y%m%d%H%M%S')}"
+                movements_created.append({
+                    "product": product.name,
+                    "quantity": quantity,
+                    "from_warehouse": from_warehouse.name,
+                    "to_warehouse": to_warehouse.name,
+                    "lots_used": [
+                        {"lot": l['lot'].lot_number, "qty": l['quantity']}
+                        for l in lots_used
+                    ]
+                })
 
-            for lot_data in lots_used:
-                lot = lot_data['lot']
-                qty = lot_data['quantity']
-                StockMovement.objects.create(
-                    product=product,
-                    lot=lot,
-                    from_warehouse=from_warehouse,
-                    to_warehouse=to_warehouse,
-                    movement_type='transfer_out',
-                    quantity=qty,
-                    reason=reason,
-                    notes=notes,
-                    created_by=request.user,
-                    reference_number=reference_number
-                )
-
-            for lot_data in lots_used:
-                source_lot = lot_data['lot']
-                qty = lot_data['quantity']
-                new_lot = Lot.objects.create(
-                    product=product,
-                    warehouse=to_warehouse,
-                    lot_number=f"{source_lot.lot_number}-TRANSF",
-                    batch_number=source_lot.batch_number,
-                    barcode=source_lot.barcode,
-                    initial_quantity=qty,
-                    current_quantity=qty,
-                    reserved_quantity=0,
-                    unit=source_lot.unit,
-                    manufacturing_date=source_lot.manufacturing_date,
-                    expiry_date=source_lot.expiry_date,
-                    purchase_price=source_lot.purchase_price,
-                    selling_price=source_lot.selling_price,
-                    status='good',
-                    created_by=request.user,
-                    notes=f"Transfert depuis {from_warehouse.name}"
-                )
-                StockMovement.objects.create(
-                    product=product,
-                    lot=new_lot,
-                    from_warehouse=from_warehouse,
-                    to_warehouse=to_warehouse,
-                    movement_type='transfer_in',
-                    quantity=qty,
-                    reason=reason,
-                    notes=notes,
-                    created_by=request.user,
-                    reference_number=reference_number
-                )
-
-            stock_source.update_quantity()
-            stock_dest, _ = Stock.objects.get_or_create(
-                product=product, warehouse=to_warehouse)
-            stock_dest.update_quantity()
-
-            movements_created.append({
-                "product": product.name,
-                "quantity": quantity,
-                "from_warehouse": from_warehouse.name,
-                "to_warehouse": to_warehouse.name,
-                "lots_used": [{"lot": l['lot'].lot_number, "qty": l['quantity']} for l in lots_used]
-            })
-
+        # Réponse finale
         response_serializer = TransferResponseSerializer({
             "message": "Transfert effectué avec succès",
             "movements": movements_created
         })
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-
-
 # ==================== DASHBOARD STATS VIEWSET ====================
 class DashboardStatsViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
