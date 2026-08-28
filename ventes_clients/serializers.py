@@ -1,4 +1,5 @@
 # apps/ventes_clients/serializers.py
+
 from produits_stocks.models import Product
 from .models import LigneVente
 from rest_framework import serializers
@@ -264,7 +265,6 @@ class DevisStatusUpdateSerializer(serializers.Serializer):
 
 
 # ==================== LIGNE VENTE ====================
-# apps/ventes_clients/serializers.py
 
 class LigneVenteSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
@@ -284,7 +284,7 @@ class LigneVenteSerializer(serializers.ModelSerializer):
             'id', 'product', 'product_name', 'product_code',
             'lot', 'lot_number',
             'quantity', 'unit_price',
-            'price_type', 'price_type_display',  # 🆕
+            'price_type', 'price_type_display',
             'discount', 'tax_rate',
             'subtotal', 'tax_amount', 'total_without_tax',
             'total', 'notes'
@@ -296,7 +296,6 @@ class LigneVenteCreateSerializer(serializers.ModelSerializer):
     """
     Sérialiseur pour créer une ligne de vente avec choix du prix (détail ou gros)
     """
-    # Nouveau champ pour le type de prix
     price_type = serializers.ChoiceField(
         choices=[
             ('detail', 'Prix de détail'),
@@ -340,13 +339,11 @@ class LigneVenteCreateSerializer(serializers.ModelSerializer):
                 product = Product.objects.get(
                     id=product_id.id if hasattr(product_id, 'id') else product_id)
 
-                # Si le type est 'gros' mais que le produit n'a pas de prix de gros
                 if price_type == 'gros' and not product.wholesale_price:
                     raise serializers.ValidationError(
                         f"Le produit {product.name} n'a pas de prix de gros défini."
                     )
 
-                # Si l'utilisateur n'a pas fourni de unit_price, on le calcule automatiquement
                 if not data.get('unit_price') or data.get('unit_price') == 0:
                     if price_type == 'gros':
                         data['unit_price'] = product.wholesale_price or product.selling_price
@@ -463,8 +460,6 @@ class VenteDetailSerializer(serializers.ModelSerializer):
         return obj.devis_source.filter(status='converted').exists()
 
 
-# apps/ventes_clients/serializers.py
-
 class VenteCreateSerializer(serializers.ModelSerializer):
     """
     Sérialiseur pour créer une vente avec gestion du type de prix
@@ -491,7 +486,6 @@ class VenteCreateSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError("Au moins un produit est requis")
 
-        # Vérification des doublons
         product_ids = []
         for line in value:
             product_id = line.get('product')
@@ -528,36 +522,39 @@ class VenteCreateSerializer(serializers.ModelSerializer):
         invoice_number = f"INV-{date.today().year}-{num:04d}"
 
         # ✅ CORRECTION : Récupérer les données du client sans utiliser 'email'
-        client_name = client.name if client else ''
-        client_phone = client.phone if client else ''
-        client_address = client.address if client else ''
-        # email supprimé - on met une chaîne vide
-        client_email = ''
+        if client:
+            client_name = client.name or ''
+            client_phone = client.phone or ''
+            client_address = client.address or ''
+        else:
+            client_name = 'Client anonyme'
+            client_phone = ''
+            client_address = ''
+            # Créer un client anonyme si nécessaire
+            client = Client.create_anonymous(created_by=self.context.get(
+                'request').user if self.context.get('request') else None)
+            validated_data['client'] = client
 
         # Création de la vente
         vente = Vente.objects.create(
             invoice_number=invoice_number,
             client_name=client_name,
             client_phone=client_phone,
-            client_email=client_email,
+            client_email='',  # email n'existe plus dans Client
             client_address=client_address,
             **validated_data
         )
 
         # Création des lignes
         for line_data in lines_data:
-            # Supprimer price_type car il n'existe pas dans le modèle LigneVente
             line_data.pop('price_type', None)
             LigneVente.objects.create(sale=vente, **line_data)
 
-        # Calcul des totaux
         vente.calculate_totals()
         vente.generate_qr_code()
         vente.save()
 
         return vente
-
-# apps/ventes_clients/serializers.py
 
 
 class VenteUpdateSerializer(serializers.ModelSerializer):
@@ -604,7 +601,6 @@ class VenteUpdateSerializer(serializers.ModelSerializer):
         if lines_data is not None:
             instance.lines.all().delete()
             for line_data in lines_data:
-                # Supprimer price_type
                 line_data.pop('price_type', None)
                 LigneVente.objects.create(sale=instance, **line_data)
 
@@ -697,6 +693,13 @@ class FactureCreateSerializer(serializers.ModelSerializer):
         sale = validated_data.get('sale')
         client = sale.client
 
+        # Si pas de client, créer un client anonyme
+        if not client:
+            client = Client.create_anonymous()
+            sale.client = client
+            sale.client_name = client.name
+            sale.save(update_fields=['client', 'client_name'])
+
         last_facture = Facture.objects.order_by('-id').first()
         if last_facture and last_facture.invoice_number:
             try:
@@ -721,9 +724,6 @@ class FactureCreateSerializer(serializers.ModelSerializer):
 
         return facture
 
-
-# ==================== PAIEMENT ====================
-# apps/ventes_clients/serializers.py
 
 # ==================== PAIEMENT ====================
 class PaiementSerializer(serializers.ModelSerializer):
@@ -815,28 +815,6 @@ class PaiementCreateSerializer(serializers.ModelSerializer):
         if caisse and compte:
             raise serializers.ValidationError(
                 "Choisissez une seule destination (caisse ou compte)."
-            )
-        return data
-
-
-class PaiementCreateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Paiement
-        fields = ['facture', 'amount', 'method', 'reference', 'notes']
-
-    def validate_amount(self, value):
-        if value <= 0:
-            raise serializers.ValidationError(
-                "Le montant doit être supérieur à 0")
-        return value
-
-    def validate(self, data):
-        facture = data.get('facture')
-        amount = data.get('amount', 0)
-
-        if facture and amount > facture.remaining_amount:
-            raise serializers.ValidationError(
-                {"amount": f"Le montant dépasse le solde restant ({facture.remaining_amount:,.0f} FCFA)"}
             )
         return data
 

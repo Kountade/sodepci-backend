@@ -96,20 +96,19 @@ def generate_qr_image(data):
 # ============================================================
 # CLIENT
 # ============================================================
-# apps/ventes_clients/models.py
 
 class Client(models.Model):
     """
     Modèle Client ultra-simplifié avec seulement 7 champs essentiels
     """
-    
+
     TYPE_CHOICES = (
         ("particulier", "Particulier"),
         ("entreprise", "Entreprise"),
         ("revendeur", "Revendeur"),
         ("grossiste", "Grossiste"),
     )
-    
+
     STATUT_CHOICES = (
         ("actif", "Actif"),
         ("inactif", "Inactif"),
@@ -182,6 +181,33 @@ class Client(models.Model):
 
     def __str__(self):
         return f"{self.code} - {self.name}"
+
+    @classmethod
+    def create_anonymous(cls, created_by=None):
+        """
+        Crée un client anonyme de manière sécurisée
+        """
+        # Vérifier si un client anonyme existe déjà
+        client = cls.objects.filter(
+            name="Client anonyme",
+            statut="actif"
+        ).first()
+
+        if client:
+            return client
+
+        count = cls.objects.count()
+        return cls.objects.create(
+            code=f"ANON-{date.today().year()}-{count + 1:04d}",
+            name="Client anonyme",
+            type="particulier",
+            phone="00000000",
+            address="Non renseigné",
+            statut="actif",
+            notes="Client créé automatiquement",
+            created_by=created_by
+        )
+
 
 # ============================================================
 # DEVIS
@@ -769,6 +795,28 @@ class Vente(models.Model):
     def __str__(self):
         return f"{self.invoice_number} - {self.client_name}"
 
+    def get_or_create_anonymous_client(self):
+        """Récupère ou crée un client anonyme"""
+        client = Client.objects.filter(
+            name="Client anonyme",
+            statut="actif"
+        ).first()
+
+        if client:
+            return client
+
+        count = Client.objects.count()
+        return Client.objects.create(
+            code=f"ANON-{date.today().year}-{count + 1:04d}",
+            name="Client anonyme",
+            type="particulier",
+            phone="00000000",
+            address="Non renseigné",
+            statut="actif",
+            notes="Client créé automatiquement pour des ventes sans client",
+            created_by=self.created_by
+        )
+
     def calculate_totals(self, save=True):
 
         self.subtotal = sum(
@@ -1172,28 +1220,6 @@ class Vente(models.Model):
     # AUTRES MÉTHODES EXISTANTES
     # ================================================================
 
-    def get_or_create_anonymous_client(self):
-
-        client = Client.objects.filter(
-            name="Client anonyme",
-            statut="actif"
-        ).first()
-
-        if client:
-            return client
-
-        return Client.objects.create(
-            code=f"ANON-{date.today().year}-{Client.objects.count() + 1:04d}",
-            name="Client anonyme",
-            phone="00000000",
-            email="anonyme@example.com",
-            address="Non renseigné",
-            city="Non renseigné",
-            country="Sénégal",
-            statut="actif",
-            created_by=self.created_by
-        )
-
     @transaction.atomic
     def generate_invoice(self):
 
@@ -1203,11 +1229,8 @@ class Vente(models.Model):
         client = self.client
 
         if not client:
-
             client = self.get_or_create_anonymous_client()
-
             self.client = client
-
             super().save(
                 update_fields=[
                     "client",
@@ -1350,11 +1373,6 @@ class Vente(models.Model):
 
 # ============================================================
 # LIGNE VENTE
-# ============================================================
-
-# apps/ventes_clients/models.py
-# ============================================================
-# LIGNE VENTE - COMPLET AVEC PRICE_TYPE
 # ============================================================
 
 class LigneVente(models.Model):
@@ -1600,10 +1618,10 @@ class LigneVente(models.Model):
             'notes': self.notes,
         }
 
+
 # ============================================================
 # FACTURE
 # ============================================================
-
 
 class Facture(models.Model):
 
@@ -1789,10 +1807,6 @@ class Facture(models.Model):
 # ============================================================
 # PAIEMENT
 # ============================================================
-
-# apps/ventes_clients/models.py
-
-# ... imports existants ...
 
 class Paiement(models.Model):
     METHOD_CHOICES = (
@@ -2006,10 +2020,11 @@ class Paiement(models.Model):
                     "updated_at"
                 ]
             )
+
+
 # ============================================================
 # AVOIR
 # ============================================================
-
 
 class Avoir(models.Model):
 
