@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "produits_stocks",
     "rest_framework",
     "ventes_clients",
+    "config",
     "dashboard",
     "knox",
     "corsheaders",
@@ -155,29 +156,21 @@ AUTH_PASSWORD_VALIDATORS = [
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
 STATIC_URL = '/static/'
+# Dossier pour les fichiers statiques en développement
+STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]
+# Dossier pour collectstatic
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
-# --- Correction du problème du dossier static manquant ---
-# Crée le dossier 'static' à la racine s'il n'existe pas
-STATICFILES_DIRS = []
-static_dir = BASE_DIR / 'static'
-if not static_dir.exists():
-    static_dir.mkdir(parents=True, exist_ok=True)
-STATICFILES_DIRS.append(static_dir)
-
-# Dossier de destination pour la commande collectstatic
-STATIC_ROOT = BASE_DIR / 'staticfiles'
-
-# Configuration de WhiteNoise pour servir les fichiers statiques en production
+# Configuration WhiteNoise
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
-# --- Media files ---
+# Configuration des fichiers média
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media/')
 
-# --- Options supplémentaires ---
-IMAGE_MAX_SIZE = (800, 800)
-THUMBNAIL_SIZE = (150, 150)
-
+# Configuration pour les images (optionnel)
+IMAGE_MAX_SIZE = (800, 800)  # Taille max des images
+THUMBNAIL_SIZE = (150, 150)  # Taille des miniatures
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 

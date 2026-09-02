@@ -1,3 +1,4 @@
+# backend/urls.py
 from django.contrib import admin
 from django.urls import path, include
 from knox import views as knox_views
@@ -12,14 +13,19 @@ urlpatterns = [
     path('', include('finances.urls')),
     path('', include('tresorerie.urls')),
     path('', include('dashboard.urls')),
+    path('', include('config.urls')),
 
 
 
     path('api/auth/', include('knox.urls')),
-
     path('logout/', knox_views.LogoutView.as_view(), name='knox_logout'),
     path('logoutall/', knox_views.LogoutAllView.as_view(), name='knox_logoutall'),
     path('api/password_reset/',
          include('django_rest_passwordreset.urls', namespace='password_reset')),
-
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL,
+                          document_root=settings.MEDIA_ROOT)
+    urlpatterns += static(settings.STATIC_URL,
+                          document_root=settings.STATIC_ROOT)
