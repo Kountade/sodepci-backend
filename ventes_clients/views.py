@@ -1,12 +1,13 @@
 # apps/ventes_clients/views.py
 # ============================================================
-# VERSION COMPLÈTE AVEC LOGS ET CRÉATION MANUELLE GARANTIE
+# IMPORTATIONS AVEC ALIAS
 # ============================================================
 
 import logging
 from io import BytesIO
 import json
 from datetime import date, timedelta
+import datetime as dt  # ✅ Utilisation d'un alias
 
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
@@ -14,6 +15,7 @@ from rest_framework.response import Response
 from django.db.models import Q, Sum, Count
 from django.utils import timezone
 from django.http import HttpResponse
+from django.db import transaction
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -47,7 +49,7 @@ from .serializers import (
     LigneDevisSerializer, LigneDevisCreateSerializer
 )
 
-# === Trésorerie (pour création manuelle des mouvements) ===
+# === Trésorerie ===
 from tresorerie.models import MouvementTresorerie, Caisse
 
 logger = logging.getLogger(__name__)
@@ -81,7 +83,7 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
     try:
         from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
 
-        # ✅ VÉRIFIER SI UN MOUVEMENT EXISTE DÉJÀ (sans utiliser mouvements_tresorerie)
+        # ✅ VÉRIFIER SI UN MOUVEMENT EXISTE DÉJÀ
         existing_movement = MouvementTresorerie.objects.filter(
             source_type='paiement_client',
             source_id=paiement.id
@@ -96,7 +98,6 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
         caisse = None
         compte = None
 
-        # Vérifier si le paiement a une caisse de destination
         if hasattr(paiement, 'caisse_destination_id') and paiement.caisse_destination_id:
             try:
                 caisse = Caisse.objects.get(id=paiement.caisse_destination_id)
@@ -105,7 +106,6 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
                 logger.warning(
                     f"⚠️ Caisse ID {paiement.caisse_destination_id} non trouvée")
 
-        # Vérifier si le paiement a un compte de destination
         if hasattr(paiement, 'compte_destination_id') and paiement.compte_destination_id:
             try:
                 compte = CompteBancaire.objects.get(
@@ -115,7 +115,6 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
                 logger.warning(
                     f"⚠️ Compte ID {paiement.compte_destination_id} non trouvé")
 
-        # Si aucune destination spécifiée, prendre la caisse par défaut de l'entrepôt
         if not caisse and not compte:
             logger.info(
                 "ℹ️ Aucune destination spécifiée, recherche de la caisse par défaut...")
@@ -127,7 +126,6 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
             if caisse:
                 logger.info(f"✅ Caisse par défaut trouvée : {caisse.nom}")
             else:
-                # Si pas de caisse par défaut, prendre la première caisse active
                 caisse = Caisse.objects.filter(
                     warehouse=sale.warehouse,
                     is_active=True
@@ -161,14 +159,12 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
             created_by=request_user
         )
 
-        # ✅ Mettre à jour le solde de la caisse (augmentation)
         if caisse:
             caisse.solde_actuel += paiement.amount
             caisse.save(update_fields=['solde_actuel', 'updated_at'])
             logger.info(
                 f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
 
-        # ✅ Mettre à jour le solde du compte bancaire (augmentation)
         if compte:
             compte.solde_actuel += paiement.amount
             compte.save(update_fields=['solde_actuel', 'updated_at'])
@@ -438,7 +434,170 @@ class VenteViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
 
     # ================================================================
-    # 1. CONFIRMER UNE VENTE
+    # 1. RÉCUPÉRER LES VENTES PAR DATE (CORRIGÉ)
+    # ================================================================
+    @action(detail=False, methods=['get'], url_path='by-date')
+    def get_by_date(self, request):
+        """
+        Récupère les ventes par date avec pagination et filtres
+        """
+        # Récupérer la date cible (par défaut aujourd'hui)
+        date_str = request.query_params.get('date')
+        if date_str:
+            try:
+                # ✅ CORRECTION : utiliser dt.datetime au lieu de datetime
+                target_date = dt.datetime.strptime(date_str, '%Y-%m-%d').date()
+            except ValueError:
+                return Response(
+                    {"error": "Format de date invalide. Utilisez YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            target_date = timezone.now().date()
+
+        # Définir la plage horaire
+        # ✅ CORRECTION : utiliser dt.datetime
+        date_start = dt.datetime.combine(target_date, dt.datetime.min.time())
+        date_end = dt.datetime.combine(target_date, dt.datetime.max.time())
+
+        # Récupérer les ventes de cette date
+        queryset = self.get_queryset().filter(
+            sale_date__gte=date_start,
+            sale_date__lte=date_end
+        ).order_by('-sale_date')
+
+        # Appliquer les filtres supplémentaires
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            status_list = status_filter.split(',')
+            queryset = queryset.filter(status__in=status_list)
+
+        payment_status = request.query_params.get('payment_status')
+        if payment_status:
+            queryset = queryset.filter(payment_status=payment_status)
+
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(invoice_number__icontains=search) |
+                Q(client_name__icontains=search)
+            )
+
+        # Stats du jour
+        stats = {
+            'total': queryset.count(),
+            'total_amount': queryset.aggregate(total=Sum('total'))['total'] or 0,
+            'by_status': {
+                'draft': queryset.filter(status='draft').count(),
+                'confirmed': queryset.filter(status='confirmed').count(),
+                'paid': queryset.filter(status='paid').count(),
+                'delivered': queryset.filter(status='delivered').count(),
+                'cancelled': queryset.filter(status='cancelled').count(),
+                'returned': queryset.filter(status='returned').count(),
+            },
+            'by_payment_status': {
+                'pending': queryset.filter(payment_status='pending').count(),
+                'partial': queryset.filter(payment_status='partial').count(),
+                'paid': queryset.filter(payment_status='paid').count(),
+            }
+        }
+
+        # Pagination
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = VenteListSerializer(page, many=True)
+            return self.get_paginated_response({
+                'date': target_date.isoformat(),
+                'stats': stats,
+                'results': serializer.data
+            })
+
+        serializer = VenteListSerializer(queryset, many=True)
+        return Response({
+            'date': target_date.isoformat(),
+            'stats': stats,
+            'results': serializer.data
+        })
+
+    # ================================================================
+    # 2. RÉCUPÉRER LES VENTES SUR UNE PLAGE DE DATES (CORRIGÉ)
+    # ================================================================
+    @action(detail=False, methods=['get'], url_path='date-range')
+    def get_date_range(self, request):
+        """
+        Récupère les ventes sur une plage de dates
+        """
+        date_from = request.query_params.get('date_from')
+        date_to = request.query_params.get('date_to')
+
+        if not date_from or not date_to:
+            return Response(
+                {"error": "Les paramètres date_from et date_to sont requis"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            # ✅ CORRECTION : utiliser dt.datetime
+            date_start = dt.datetime.strptime(date_from, '%Y-%m-%d')
+            date_end = dt.datetime.strptime(date_to, '%Y-%m-%d')
+        except ValueError:
+            return Response(
+                {"error": "Format de date invalide. Utilisez YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Inclure toute la journée de fin
+        date_end = date_end.replace(hour=23, minute=59, second=59)
+
+        queryset = self.get_queryset().filter(
+            sale_date__gte=date_start,
+            sale_date__lte=date_end
+        ).order_by('-sale_date')
+
+        # Filtres
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            status_list = status_filter.split(',')
+            queryset = queryset.filter(status__in=status_list)
+
+        payment_status = request.query_params.get('payment_status')
+        if payment_status:
+            queryset = queryset.filter(payment_status=payment_status)
+
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(invoice_number__icontains=search) |
+                Q(client_name__icontains=search)
+            )
+
+        # Stats
+        stats = {
+            'total': queryset.count(),
+            'total_amount': queryset.aggregate(total=Sum('total'))['total'] or 0,
+        }
+
+        # Pagination
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = VenteListSerializer(page, many=True)
+            return self.get_paginated_response({
+                'date_from': date_from,
+                'date_to': date_to,
+                'stats': stats,
+                'results': serializer.data
+            })
+
+        serializer = VenteListSerializer(queryset, many=True)
+        return Response({
+            'date_from': date_from,
+            'date_to': date_to,
+            'stats': stats,
+            'results': serializer.data
+        })
+
+    # ================================================================
+    # 3. CONFIRMER UNE VENTE
     # ================================================================
     @action(detail=True, methods=['post'])
     def confirm(self, request, pk=None):
@@ -490,7 +649,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             vente.status = 'confirmed'
             vente.save()
 
-            # 4. CRÉATION DU MOUVEMENT DE TRÉSORERIE (ENCAISSEMENT)
+            # 4. CRÉATION DU MOUVEMENT DE TRÉSORERIE
             mouvement = None
             try:
                 from tresorerie.models import MouvementTresorerie, Caisse
@@ -546,7 +705,6 @@ class VenteViewSet(viewsets.ModelViewSet):
 
             # 5. Génération de la facture
             from .models import Facture
-            from datetime import date
 
             facture = Facture.objects.filter(sale=vente).first()
             if not facture:
@@ -606,7 +764,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             )
 
     # ================================================================
-    # 2. ENREGISTRER UN PAIEMENT SUR UNE VENTE
+    # 4. ENREGISTRER UN PAIEMENT SUR UNE VENTE
     # ================================================================
     @action(detail=True, methods=['post'])
     def register_payment(self, request, pk=None):
@@ -776,7 +934,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_201_CREATED)
 
     # ================================================================
-    # 3. MISE À JOUR DU STATUT
+    # 5. MISE À JOUR DU STATUT
     # ================================================================
     @action(detail=True, methods=['post'])
     def update_status(self, request, pk=None):
@@ -823,7 +981,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             )
 
     # ================================================================
-    # 4. MARQUER COMME PAYÉ (CORRIGÉ)
+    # 6. MARQUER COMME PAYÉ
     # ================================================================
     @action(detail=True, methods=['post'])
     def mark_paid(self, request, pk=None):
@@ -837,7 +995,6 @@ class VenteViewSet(viewsets.ModelViewSet):
 
         vente = self.get_object()
 
-        # Vérifier que la vente est dans un état permettant le paiement
         if vente.status not in ['confirmed', 'delivered']:
             return Response(
                 {"error": "Seule une vente confirmée ou livrée peut être marquée comme payée."},
@@ -851,10 +1008,8 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # S'assurer qu'une facture existe pour cette vente
         facture = vente.invoices.first()
         if not facture:
-            # Générer automatiquement la facture (méthode existante dans le modèle Vente)
             facture = vente.generate_invoice()
             if not facture:
                 return Response(
@@ -863,18 +1018,16 @@ class VenteViewSet(viewsets.ModelViewSet):
                 )
 
         with transaction.atomic():
-            # 1. Créer le paiement
             paiement = Paiement.objects.create(
                 facture=facture,
                 amount=amount_due,
-                method='cash',          # Méthode par défaut, vous pouvez la modifier
-                reference='',           # Laissez vide ou générez un numéro
+                method='cash',
+                reference='',
                 notes='Paiement automatique (marquer comme payé)',
                 received_by=request.user
             )
             logger.info(f"✅ Paiement automatique créé : ID {paiement.id}")
 
-            # 2. Mettre à jour la facture
             total_paid_facture = facture.paiements.aggregate(
                 total=Sum('amount')
             )['total'] or Decimal('0')
@@ -882,37 +1035,33 @@ class VenteViewSet(viewsets.ModelViewSet):
             facture.status = 'paid' if total_paid_facture >= facture.total else 'partial'
             facture.save()
 
-            # 3. Mettre à jour la vente
             vente.amount_paid += amount_due
             vente.amount_due = vente.total - vente.amount_paid
             if vente.amount_due <= 0:
                 vente.payment_status = 'paid'
-                vente.status = 'paid'       # Optionnel : passer le statut global à payé
+                vente.status = 'paid'
             elif vente.amount_paid > 0:
                 vente.payment_status = 'partial'
             else:
                 vente.payment_status = 'pending'
             vente.save()
 
-            # 4. Créer le mouvement de trésorerie (encaissement)
+            # Créer le mouvement de trésorerie
             try:
-                from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
+                from tresorerie.models import MouvementTresorerie, Caisse
 
-                # Choisir une caisse par défaut (ou un compte) associée à l'entrepôt
                 caisse = Caisse.objects.filter(
                     warehouse=vente.warehouse,
                     is_default=True
                 ).first()
 
                 if not caisse:
-                    # Si aucune caisse par défaut, prendre la première active
                     caisse = Caisse.objects.filter(
                         warehouse=vente.warehouse,
                         is_active=True
                     ).first()
 
                 if caisse:
-                    # Vérifier si un mouvement existe déjà
                     mouvement_existant = MouvementTresorerie.objects.filter(
                         source_type='paiement_client',
                         source_id=paiement.id
@@ -934,7 +1083,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                             libelle=f"Paiement vente {vente.invoice_number} - {vente.client_name}",
                             created_by=request.user
                         )
-                        # Mettre à jour le solde de la caisse
                         caisse.solde_actuel += paiement.amount
                         caisse.save(update_fields=[
                                     'solde_actuel', 'updated_at'])
@@ -951,7 +1099,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 logger.error(
                     f"Erreur lors de la création du mouvement trésorerie : {e}")
 
-        # 5. Réponse de succès
         return Response({
             'status': 'success',
             'message': 'La vente a été marquée comme payée.',
@@ -963,7 +1110,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_200_OK)
 
     # ================================================================
-    # 5. ANNULER UNE VENTE
+    # 7. ANNULER UNE VENTE
     # ================================================================
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
@@ -998,7 +1145,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             )
 
     # ================================================================
-    # 6. MARQUER COMME LIVRÉ
+    # 8. MARQUER COMME LIVRÉ
     # ================================================================
     @action(detail=True, methods=['post'])
     def deliver(self, request, pk=None):
@@ -1026,7 +1173,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         })
 
     # ================================================================
-    # 7. RETOURNER UNE VENTE
+    # 9. RETOURNER UNE VENTE
     # ================================================================
     @action(detail=True, methods=['post'])
     def return_sale(self, request, pk=None):
@@ -1056,7 +1203,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             )
 
     # ================================================================
-    # 8. RÉCUPÉRER LES PAIEMENTS
+    # 10. RÉCUPÉRER LES PAIEMENTS
     # ================================================================
     @action(detail=True, methods=['get'])
     def payments(self, request, pk=None):
@@ -1071,7 +1218,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     # ================================================================
-    # 9. RÉCUPÉRER LES FACTURES
+    # 11. RÉCUPÉRER LES FACTURES
     # ================================================================
     @action(detail=True, methods=['get'])
     def invoices(self, request, pk=None):
@@ -1083,7 +1230,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     # ================================================================
-    # 10. GÉNÉRER LE QR CODE
+    # 12. GÉNÉRER LE QR CODE
     # ================================================================
     @action(detail=True, methods=['get'])
     def generate_qr(self, request, pk=None):
@@ -1103,7 +1250,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         )
 
     # ================================================================
-    # 11. RÉCUPÉRER LES MOUVEMENTS DE STOCK
+    # 13. RÉCUPÉRER LES MOUVEMENTS DE STOCK
     # ================================================================
     @action(detail=True, methods=['get'])
     def stock_movements(self, request, pk=None):
@@ -1117,7 +1264,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     # ================================================================
-    # 12. STATISTIQUES
+    # 14. STATISTIQUES
     # ================================================================
     @action(detail=False, methods=['get'])
     def stats(self, request):
