@@ -959,4 +959,3 @@ class DevisStatsSerializer(serializers.Serializer):
     acceptes = serializers.IntegerField()
     expires = serializers.IntegerField()
     convertis = serializers.IntegerField()
-
