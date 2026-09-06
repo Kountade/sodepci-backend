@@ -23,7 +23,8 @@ def validate_image_file(value):
 
     if value.size > 5 * 1024 * 1024:
         raise serializers.ValidationError(
-            "Le fichier ne doit pas dépasser 5 Mo.")
+            "Le fichier ne doit pas dépasser 5 Mo."
+        )
 
     if ext == 'svg':
         content = value.read(1024)
@@ -40,7 +41,8 @@ def validate_image_file(value):
         img = Image.open(value)
         if img.width <= 0 or img.height <= 0:
             raise serializers.ValidationError(
-                "L'image a des dimensions invalides.")
+                "L'image a des dimensions invalides."
+            )
         return value
     except Exception as e:
         logger.error(f"Erreur validation image : {str(e)}")
@@ -65,8 +67,9 @@ class EtablissementSerializer(serializers.ModelSerializer):
     class Meta:
         model = Etablissement
         fields = [
-            'id', 'nom', 'sigle', 'adresse', 'telephone', 'email',
-            'site_web', 'logo', 'devise', 'systeme_notation',
+            'id', 'nom', 'sigle', 'adresse',
+            'telephone1', 'telephone2',  # ✅ Nouveaux champs
+            'email', 'site_web', 'logo', 'devise', 'systeme_notation',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -74,7 +77,8 @@ class EtablissementSerializer(serializers.ModelSerializer):
     def validate_nom(self, value):
         if not value or len(value.strip()) < 2:
             raise serializers.ValidationError(
-                "Le nom doit contenir au moins 2 caractères.")
+                "Le nom doit contenir au moins 2 caractères."
+            )
         return value.strip()
 
     def validate_email(self, value):
@@ -82,10 +86,21 @@ class EtablissementSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Adresse email invalide.")
         return value
 
-    def validate_telephone(self, value):
+    # ✅ Validation pour telephone1 et telephone2
+    def validate_telephone1(self, value):
         if value:
             cleaned = ''.join(c for c in value if c.isdigit() or c in '+ -')
             if len(cleaned) < 8:
                 raise serializers.ValidationError(
-                    "Le numéro de téléphone est trop court.")
+                    "Le numéro de téléphone principal est trop court (minimum 8 chiffres)."
+                )
+        return value
+
+    def validate_telephone2(self, value):
+        if value:
+            cleaned = ''.join(c for c in value if c.isdigit() or c in '+ -')
+            if len(cleaned) < 8:
+                raise serializers.ValidationError(
+                    "Le numéro de téléphone secondaire est trop court (minimum 8 chiffres)."
+                )
         return value

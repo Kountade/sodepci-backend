@@ -1,5 +1,5 @@
 # apps/config/views.py
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from .models import Etablissement
@@ -12,14 +12,9 @@ class EtablissementViewSet(viewsets.ModelViewSet):
     serializer_class = EtablissementSerializer
 
     def get_permissions(self):
-        """
-        Permissions personnalisées selon l'action
-        """
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            # Écriture : seulement admin
             return [IsAdmin()]
         else:
-            # Lecture : authentifié
             return [permissions.IsAuthenticated()]
 
     @action(detail=False, methods=['get'], url_path='unique')
