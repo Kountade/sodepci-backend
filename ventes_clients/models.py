@@ -2242,3 +2242,181 @@ class Remise(models.Model):
             return False
 
         return True
+
+
+# apps/ventes_clients/models.py
+
+class ClientWallet(models.Model):
+    """
+    Porte-monnaie électronique du client
+    """
+    client = models.OneToOneField(
+        Client,
+        on_delete=models.CASCADE,
+        related_name='wallet',
+        verbose_name="Client"
+    )
+    
+    balance = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        verbose_name="Solde disponible"
+    )
+    
+    total_deposits = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        verbose_name="Total des dépôts"
+    )
+    
+    total_used = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        verbose_name="Total utilisé"
+    )
+    
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="Wallet actif"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = "Porte-monnaie client"
+        verbose_name_plural = "Porte-monnaie clients"
+    
+    def __str__(self):
+        return f"{self.client.name} - {self.balance:,.0f} FCFA"
+    
+    @transaction.atomic
+    def credit(self, amount, source, reference, notes=''):
+        """
+        Ajoute de l'argent au wallet du client
+        """
+        if amount <= 0:
+            raise ValidationError("Le montant doit être supérieur à zéro")
+        
+        self.balance += amount
+        self.total_deposits += amount
+        self.save()
+        
+        # Créer l'historique de transaction
+        WalletTransaction.objects.create(
+            wallet=self,
+            type='credit',
+            amount=amount,
+            source=source,
+            reference=reference,
+            notes=notes,
+            balance_after=self.balance
+        )
+        
+        return self.balance
+    
+    @transaction.atomic
+    def debit(self, amount, source, reference, notes=''):
+        """
+        Débite le wallet du client (utilisé pour payer)
+        """
+        if amount <= 0:
+            raise ValidationError("Le montant doit être supérieur à zéro")
+        
+        if amount > self.balance:
+            raise ValidationError(
+                f"Solde insuffisant. Disponible : {self.balance:,.0f} FCFA"
+            )
+        
+        self.balance -= amount
+        self.total_used += amount
+        self.save()
+        
+        # Créer l'historique de transaction
+        WalletTransaction.objects.create(
+            wallet=self,
+            type='debit',
+            amount=amount,
+            source=source,
+            reference=reference,
+            notes=notes,
+            balance_after=self.balance
+        )
+        
+        return self.balance
+
+
+class WalletTransaction(models.Model):
+    """
+    Historique des transactions du wallet
+    """
+    TRANSACTION_TYPES = (
+        ('credit', 'Crédit'),
+        ('debit', 'Débit'),
+    )
+    
+    SOURCE_CHOICES = (
+        ('deposit', 'Dépôt en espèces'),
+        ('payment', 'Paiement facture'),
+        ('avoir', 'Avoir commercial'),
+        ('refund', 'Remboursement'),
+        ('transfer', 'Transfert'),
+        ('adjustment', 'Ajustement'),
+    )
+    
+    wallet = models.ForeignKey(
+        ClientWallet,
+        on_delete=models.CASCADE,
+        related_name='transactions'
+    )
+    
+    type = models.CharField(
+        max_length=10,
+        choices=TRANSACTION_TYPES
+    )
+    
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2
+    )
+    
+    source = models.CharField(
+        max_length=20,
+        choices=SOURCE_CHOICES
+    )
+    
+    reference = models.CharField(
+        max_length=100,
+        blank=True,
+        verbose_name="Référence"
+    )
+    
+    notes = models.TextField(
+        blank=True,
+        verbose_name="Notes"
+    )
+    
+    balance_after = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        verbose_name="Solde après transaction"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+    
+    class Meta:
+        verbose_name = "Transaction wallet"
+        verbose_name_plural = "Transactions wallet"
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.get_type_display()} - {self.amount:,.0f} FCFA"

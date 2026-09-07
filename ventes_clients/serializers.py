@@ -9,7 +9,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from .models import (
     Client, Vente, LigneVente, Paiement, Facture,
-    Avoir, Taxe, Remise, Devis, LigneDevis
+    Avoir, Taxe, Remise, Devis, LigneDevis, ClientWallet, WalletTransaction
 )
 from produits_stocks.models import Product, Lot, Stock, StockMovement
 from produits_stocks.serializers import ProductListSerializer, LotListSerializer
@@ -959,3 +959,84 @@ class DevisStatsSerializer(serializers.Serializer):
     acceptes = serializers.IntegerField()
     expires = serializers.IntegerField()
     convertis = serializers.IntegerField()
+
+
+# apps/ventes_clients/serializers.py
+
+class ClientWalletSerializer(serializers.ModelSerializer):
+    client_name = serializers.CharField(source='client.name', read_only=True)
+    client_code = serializers.CharField(source='client.code', read_only=True)
+    balance_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClientWallet
+        fields = [
+            'id', 'client', 'client_name', 'client_code',
+            'balance', 'balance_display',
+            'total_deposits', 'total_used',
+            'is_active', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'balance', 'total_deposits', 'total_used']
+
+    def get_balance_display(self, obj):
+        return f"{obj.balance:,.0f} FCFA"
+
+
+class WalletTransactionSerializer(serializers.ModelSerializer):
+    type_display = serializers.CharField(
+        source='get_type_display', read_only=True)
+    source_display = serializers.CharField(
+        source='get_source_display', read_only=True)
+    amount_display = serializers.SerializerMethodField()
+    created_by_name = serializers.CharField(
+        source='created_by.full_name', read_only=True)
+
+    class Meta:
+        model = WalletTransaction
+        fields = [
+            'id', 'type', 'type_display',
+            'amount', 'amount_display',
+            'source', 'source_display',
+            'reference', 'notes',
+            'balance_after', 'created_at',
+            'created_by', 'created_by_name'
+        ]
+
+    def get_amount_display(self, obj):
+        return f"{obj.amount:,.0f} FCFA"
+
+
+class WalletDepositSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    payment_method = serializers.ChoiceField(
+        choices=['cash', 'card', 'transfer', 'mobile_money'],
+        default='cash'
+    )
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError(
+                "Le montant doit être supérieur à 0")
+        return value
+
+
+class WalletPaymentSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    sale_id = serializers.IntegerField()
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError(
+                "Le montant doit être supérieur à 0")
+        return value
+
+    def validate_sale_id(self, value):
+        try:
+            sale = Vente.objects.get(id=value)
+            if sale.status == 'cancelled':
+                raise serializers.ValidationError("Cette vente est annulée")
+            return value
+        except Vente.DoesNotExist:
+            raise serializers.ValidationError("Vente non trouvée")
