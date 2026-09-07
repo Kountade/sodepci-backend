@@ -1,4 +1,7 @@
 # apps/ventes_clients/serializers.py
+# ============================================================
+# SERIALIZERS COMPLET - AVEC WALLET CREATE
+# ============================================================
 
 from produits_stocks.models import Product
 from .models import LigneVente
@@ -15,7 +18,10 @@ from produits_stocks.models import Product, Lot, Stock, StockMovement
 from produits_stocks.serializers import ProductListSerializer, LotListSerializer
 
 
-# ==================== CLIENT ====================
+# ============================================================
+# CLIENT
+# ============================================================
+
 class ClientSerializer(serializers.ModelSerializer):
     class Meta:
         model = Client
@@ -38,8 +44,10 @@ class ClientListSerializer(serializers.ModelSerializer):
         model = Client
         fields = ['id', 'code', 'name', 'type', 'phone', 'statut']
 
-# ==================== DEVIS ====================
 
+# ============================================================
+# DEVIS
+# ============================================================
 
 class LigneDevisSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
@@ -185,7 +193,6 @@ class DevisCreateSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError("Au moins un produit est requis")
 
-        # Vérification des doublons
         product_ids = [line.get('product')
                        for line in value if line.get('product')]
         if len(product_ids) != len(set(product_ids)):
@@ -264,7 +271,9 @@ class DevisStatusUpdateSerializer(serializers.Serializer):
         return value
 
 
-# ==================== LIGNE VENTE ====================
+# ============================================================
+# LIGNE VENTE
+# ============================================================
 
 class LigneVenteSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
@@ -328,9 +337,6 @@ class LigneVenteCreateSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, data):
-        """
-        Validation : si price_type est 'gros', s'assurer que le produit a un prix de gros
-        """
         product_id = data.get('product')
         price_type = data.get('price_type', 'detail')
 
@@ -356,7 +362,10 @@ class LigneVenteCreateSerializer(serializers.ModelSerializer):
         return data
 
 
-# ==================== VENTE ====================
+# ============================================================
+# VENTE
+# ============================================================
+
 class VenteListSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.name', read_only=True)
     status_display = serializers.CharField(
@@ -521,7 +530,6 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             num = 1
         invoice_number = f"INV-{date.today().year}-{num:04d}"
 
-        # ✅ CORRECTION : Récupérer les données du client sans utiliser 'email'
         if client:
             client_name = client.name or ''
             client_phone = client.phone or ''
@@ -530,7 +538,6 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             client_name = 'Client anonyme'
             client_phone = ''
             client_address = ''
-            # Créer un client anonyme si nécessaire
             client = Client.create_anonymous(created_by=self.context.get(
                 'request').user if self.context.get('request') else None)
             validated_data['client'] = client
@@ -540,7 +547,7 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             invoice_number=invoice_number,
             client_name=client_name,
             client_phone=client_phone,
-            client_email='',  # email n'existe plus dans Client
+            client_email='',
             client_address=client_address,
             **validated_data
         )
@@ -623,7 +630,10 @@ class VenteStatusUpdateSerializer(serializers.Serializer):
         return value
 
 
-# ==================== FACTURE ====================
+# ============================================================
+# FACTURE
+# ============================================================
+
 class FactureSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.name', read_only=True)
     sale_number = serializers.CharField(
@@ -693,7 +703,6 @@ class FactureCreateSerializer(serializers.ModelSerializer):
         sale = validated_data.get('sale')
         client = sale.client
 
-        # Si pas de client, créer un client anonyme
         if not client:
             client = Client.create_anonymous()
             sale.client = client
@@ -725,7 +734,10 @@ class FactureCreateSerializer(serializers.ModelSerializer):
         return facture
 
 
-# ==================== PAIEMENT ====================
+# ============================================================
+# PAIEMENT
+# ============================================================
+
 class PaiementSerializer(serializers.ModelSerializer):
     method_display = serializers.CharField(
         source='get_method_display', read_only=True)
@@ -819,7 +831,10 @@ class PaiementCreateSerializer(serializers.ModelSerializer):
         return data
 
 
-# ==================== AVOIR ====================
+# ============================================================
+# AVOIR
+# ============================================================
+
 class AvoirSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.name', read_only=True)
     sale_number = serializers.CharField(
@@ -884,7 +899,10 @@ class AvoirCreateSerializer(serializers.ModelSerializer):
         return avoir
 
 
-# ==================== TAXE ====================
+# ============================================================
+# TAXE
+# ============================================================
+
 class TaxeSerializer(serializers.ModelSerializer):
     rate_display = serializers.SerializerMethodField()
 
@@ -898,7 +916,10 @@ class TaxeSerializer(serializers.ModelSerializer):
         return f"{obj.rate}%"
 
 
-# ==================== REMISE ====================
+# ============================================================
+# REMISE
+# ============================================================
+
 class RemiseSerializer(serializers.ModelSerializer):
     type_display = serializers.CharField(
         source='get_type_display', read_only=True)
@@ -923,7 +944,10 @@ class RemiseSerializer(serializers.ModelSerializer):
         return f"{obj.value:,.0f} FCFA"
 
 
-# ==================== DASHBOARD STATS SERIALIZERS ====================
+# ============================================================
+# DASHBOARD STATS SERIALIZERS
+# ============================================================
+
 class SalesSummarySerializer(serializers.Serializer):
     sales = serializers.DictField()
     amounts = serializers.DictField()
@@ -961,7 +985,9 @@ class DevisStatsSerializer(serializers.Serializer):
     convertis = serializers.IntegerField()
 
 
-# apps/ventes_clients/serializers.py
+# ============================================================
+# WALLET SERIALIZERS
+# ============================================================
 
 class ClientWalletSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.name', read_only=True)
@@ -1040,3 +1066,41 @@ class WalletPaymentSerializer(serializers.Serializer):
             return value
         except Vente.DoesNotExist:
             raise serializers.ValidationError("Vente non trouvée")
+
+
+# ============================================================
+# ✅ NOUVEAU : CLIENT WALLET CREATE SERIALIZER
+# ============================================================
+
+class ClientWalletCreateSerializer(serializers.Serializer):
+    """
+    Serializer pour la création d'un wallet
+    """
+    client_id = serializers.IntegerField(required=True)
+    initial_balance = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        required=False
+    )
+
+    def validate_client_id(self, value):
+        try:
+            client = Client.objects.get(id=value)
+            # Vérifier si le client a déjà un wallet
+            if hasattr(client, 'wallet'):
+                raise serializers.ValidationError(
+                    "Ce client a déjà un porte-monnaie"
+                )
+            return value
+        except Client.DoesNotExist:
+            raise serializers.ValidationError(
+                f"Client avec l'ID {value} non trouvé"
+            )
+
+    def validate_initial_balance(self, value):
+        if value < 0:
+            raise serializers.ValidationError(
+                "Le solde initial ne peut pas être négatif"
+            )
+        return value

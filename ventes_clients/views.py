@@ -46,7 +46,7 @@ from .serializers import (
     DevisListSerializer, DevisDetailSerializer,
     DevisCreateSerializer, DevisUpdateSerializer,
     DevisStatusUpdateSerializer,
-    LigneDevisSerializer, LigneDevisCreateSerializer, WalletDepositSerializer
+    LigneDevisSerializer, LigneDevisCreateSerializer, WalletDepositSerializer, ClientWalletCreateSerializer, WalletTransactionSerializer
 )
 
 # === Trésorerie ===
@@ -1815,18 +1815,72 @@ class SalesDashboardStatsViewSet(viewsets.ViewSet):
 # apps/ventes_clients/views.py
 
 
+# apps/ventes_clients/views.py - Ajouter dans WalletViewSet
+
+# ============================================================
+
+
+# apps/ventes_clients/views.py - WalletViewSet COMPLET
+
+# ============================================================
+# WALLET VIEWSET - AVEC LIST_WALLETS
+# ============================================================
+
 class WalletViewSet(viewsets.ViewSet):
     """
     API pour gérer le porte-monnaie client
     """
     permission_classes = [permissions.IsAuthenticated]
 
+    # ============================================================
+    # ✅ LISTE DES WALLETS (POUR ADMIN)
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='list')
+    def list_wallets(self, request):
+        """
+        Liste tous les wallets avec leurs clients (admin uniquement)
+        GET /wallet/list/
+        """
+        if not request.user.is_staff:
+            return Response(
+                {"error": "Permission non accordée. Accès réservé aux administrateurs."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        try:
+            wallets = ClientWallet.objects.select_related(
+                'client').all().order_by('-created_at')
+
+            # Compter les statistiques
+            total = wallets.count()
+            total_balance = wallets.aggregate(
+                total=Sum('balance'))['total'] or 0
+            active_count = wallets.filter(is_active=True).count()
+            inactive_count = wallets.filter(is_active=False).count()
+
+            serializer = ClientWalletSerializer(wallets, many=True)
+
+            return Response({
+                'count': total,
+                'total_balance': total_balance,
+                'active_count': active_count,
+                'inactive_count': inactive_count,
+                'results': serializer.data
+            })
+        except Exception as e:
+            return Response(
+                {"error": f"Erreur lors du chargement des wallets: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    # ============================================================
+    # RÉCUPÉRER LE WALLET DU CLIENT CONNECTÉ
+    # ============================================================
     @action(detail=False, methods=['get'])
     def my_wallet(self, request):
         """
         Récupère le wallet du client connecté
         """
-        # Si l'utilisateur est un client
         client = getattr(request.user, 'client', None)
         if not client:
             return Response(
@@ -1838,6 +1892,114 @@ class WalletViewSet(viewsets.ViewSet):
         serializer = ClientWalletSerializer(wallet)
         return Response(serializer.data)
 
+    # ============================================================
+    # ✅ CRÉATION DU WALLET
+    # ============================================================
+    @action(detail=False, methods=['post'], url_path='create-wallet')
+    def create_wallet(self, request):
+        """
+        Crée un porte-monnaie pour un client spécifique
+        URL: POST /wallet/create-wallet/
+        Body: { "client_id": 1, "initial_balance": 0 }
+        """
+        from .serializers import ClientWalletCreateSerializer
+
+        serializer = ClientWalletCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        client_id = serializer.validated_data['client_id']
+        initial_balance = serializer.validated_data.get('initial_balance', 0)
+
+        try:
+            client = Client.objects.get(id=client_id)
+
+            # Vérifier que le client n'a pas déjà un wallet
+            if hasattr(client, 'wallet'):
+                return Response(
+                    {
+                        "error": "Ce client a déjà un porte-monnaie",
+                        "wallet": ClientWalletSerializer(client.wallet).data
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Créer le wallet
+            with transaction.atomic():
+                wallet = ClientWallet.objects.create(
+                    client=client,
+                    balance=initial_balance,
+                    total_deposits=initial_balance,
+                    total_used=0,
+                    is_active=True
+                )
+
+                # Si un solde initial est défini, créer une transaction
+                if initial_balance > 0:
+                    WalletTransaction.objects.create(
+                        wallet=wallet,
+                        type='credit',
+                        amount=initial_balance,
+                        source='adjustment',
+                        reference=f"INITIAL-{wallet.id}",
+                        notes=f"Solde initial de {initial_balance:,.0f} FCFA",
+                        balance_after=initial_balance,
+                        created_by=request.user
+                    )
+
+                return Response({
+                    'status': 'success',
+                    'message': f'Porte-monnaie créé avec succès pour {client.name}',
+                    'wallet': ClientWalletSerializer(wallet).data
+                }, status=status.HTTP_201_CREATED)
+
+        except Client.DoesNotExist:
+            return Response(
+                {"error": f"Client avec l'ID {client_id} non trouvé"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Erreur lors de la création du wallet: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    # ============================================================
+    # ✅ ADMIN : RÉCUPÉRER LE WALLET D'UN CLIENT
+    # ============================================================
+    @action(detail=True, methods=['get', 'post'])
+    def client_wallet(self, request, pk=None):
+        """
+        Admin : Récupérer ou créer le wallet d'un client spécifique
+        GET /wallet/client_wallet/{id}/
+        POST /wallet/client_wallet/{id}/ -> Crée le wallet si inexistant
+        """
+        if not request.user.is_staff:
+            return Response(
+                {"error": "Permission non accordée"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        try:
+            client = Client.objects.get(id=pk)
+            wallet, created = ClientWallet.objects.get_or_create(client=client)
+
+            return Response({
+                'wallet': ClientWalletSerializer(wallet).data,
+                'created': created
+            })
+        except Client.DoesNotExist:
+            return Response(
+                {"error": "Client non trouvé"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+    # ============================================================
+    # DÉPÔT DANS LE WALLET
+    # ============================================================
     @action(detail=False, methods=['post'])
     def deposit(self, request):
         """
@@ -1857,12 +2019,14 @@ class WalletViewSet(viewsets.ViewSet):
         amount = serializer.validated_data['amount']
         notes = serializer.validated_data.get('notes', '')
         payment_method = serializer.validated_data.get(
-            'payment_method', 'cash')
+            'payment_method', 'cash'
+        )
 
         try:
             with transaction.atomic():
                 wallet, created = ClientWallet.objects.get_or_create(
-                    client=client)
+                    client=client
+                )
 
                 # Créditer le wallet
                 new_balance = wallet.credit(
@@ -1872,7 +2036,7 @@ class WalletViewSet(viewsets.ViewSet):
                     notes=notes or f"Dépôt de {amount:,.0f} FCFA en {payment_method}"
                 )
 
-                # Créer un mouvement de trésorerie (encaissement)
+                # Créer un mouvement de trésorerie
                 from tresorerie.models import MouvementTresorerie, Caisse
 
                 caisse = Caisse.objects.filter(
@@ -1913,6 +2077,9 @@ class WalletViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+    # ============================================================
+    # PAYER AVEC LE WALLET
+    # ============================================================
     @action(detail=False, methods=['post'])
     def pay_with_wallet(self, request):
         """
@@ -1935,17 +2102,14 @@ class WalletViewSet(viewsets.ViewSet):
 
         try:
             with transaction.atomic():
-                # Récupérer la vente
                 sale = Vente.objects.get(id=sale_id, client=client)
 
-                # Vérifier que la vente n'est pas déjà payée
                 if sale.payment_status == 'paid':
                     return Response(
                         {"error": "Cette vente est déjà entièrement payée"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                # Vérifier le montant restant
                 amount_due = sale.total - sale.amount_paid
                 if amount > amount_due:
                     return Response({
@@ -1955,13 +2119,11 @@ class WalletViewSet(viewsets.ViewSet):
                 wallet, created = ClientWallet.objects.get_or_create(
                     client=client)
 
-                # Vérifier le solde du wallet
                 if wallet.balance < amount:
                     return Response({
                         "error": f"Solde insuffisant. Disponible : {wallet.balance:,.0f} FCFA"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                # Débiter le wallet
                 new_balance = wallet.debit(
                     amount=amount,
                     source='payment',
@@ -1969,7 +2131,6 @@ class WalletViewSet(viewsets.ViewSet):
                     notes=notes or f"Paiement facture {sale.invoice_number}"
                 )
 
-                # Créer le paiement
                 facture = sale.invoices.first()
                 if not facture:
                     facture = sale.generate_invoice()
@@ -1983,7 +2144,6 @@ class WalletViewSet(viewsets.ViewSet):
                     received_by=request.user
                 )
 
-                # Mettre à jour la vente
                 sale.amount_paid += amount
                 sale.amount_due = sale.total - sale.amount_paid
                 if sale.amount_due <= 0:
@@ -1993,7 +2153,6 @@ class WalletViewSet(viewsets.ViewSet):
                     sale.payment_status = 'partial'
                 sale.save()
 
-                # Mettre à jour la facture
                 facture.amount_paid = sale.amount_paid
                 if facture.amount_paid >= facture.total:
                     facture.status = 'paid'
@@ -2022,6 +2181,9 @@ class WalletViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+    # ============================================================
+    # HISTORIQUE DES TRANSACTIONS
+    # ============================================================
     @action(detail=False, methods=['get'])
     def transactions(self, request):
         """
@@ -2038,25 +2200,3 @@ class WalletViewSet(viewsets.ViewSet):
         transactions = wallet.transactions.all()[:50]
         serializer = WalletTransactionSerializer(transactions, many=True)
         return Response(serializer.data)
-
-    @action(detail=True, methods=['get'])
-    def client_wallet(self, request, pk=None):
-        """
-        Admin : Récupérer le wallet d'un client spécifique
-        """
-        if not request.user.is_staff:
-            return Response(
-                {"error": "Permission non accordée"},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        try:
-            client = Client.objects.get(id=pk)
-            wallet, created = ClientWallet.objects.get_or_create(client=client)
-            serializer = ClientWalletSerializer(wallet)
-            return Response(serializer.data)
-        except Client.DoesNotExist:
-            return Response(
-                {"error": "Client non trouvé"},
-                status=status.HTTP_404_NOT_FOUND
-            )
