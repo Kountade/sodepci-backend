@@ -1911,6 +1911,8 @@ logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
+# apps/ventes_clients/views.py - WalletViewSet corrigé
+
 
 class WalletViewSet(viewsets.ViewSet):
     """
@@ -1918,6 +1920,11 @@ class WalletViewSet(viewsets.ViewSet):
     Toutes les actions requièrent un client_id explicite
     """
     permission_classes = [permissions.IsAuthenticated]
+
+    # ✅ Helper pour vérifier si l'utilisateur est admin
+    def _is_admin(self, user):
+        """Vérifie si l'utilisateur a le rôle admin"""
+        return user.role == 'admin' or user.is_staff or user.is_superuser
 
     # ============================================================
     # 1. LISTE DES WALLETS (ADMIN)
@@ -1928,7 +1935,8 @@ class WalletViewSet(viewsets.ViewSet):
         Liste tous les wallets avec leurs clients (admin uniquement)
         GET /wallet/list/
         """
-        if not request.user.is_staff:
+        # ✅ CORRECTION : Vérifier le rôle admin
+        if not self._is_admin(request.user):
             return Response(
                 {"error": "Permission non accordée. Accès réservé aux administrateurs."},
                 status=status.HTTP_403_FORBIDDEN
@@ -1990,6 +1998,7 @@ class WalletViewSet(viewsets.ViewSet):
         Récupère le wallet d'un client spécifique par son ID
         GET /wallet/{client_id}/client-wallet/
         """
+        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         try:
             client = Client.objects.get(id=pk)
             wallet, created = ClientWallet.objects.get_or_create(client=client)
@@ -2032,6 +2041,7 @@ class WalletViewSet(viewsets.ViewSet):
         URL: POST /wallet/create-wallet/
         Body: { "client_id": 1, "initial_balance": 0 }
         """
+        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         client_id = request.data.get('client_id')
         initial_balance = request.data.get('initial_balance', 0)
 
@@ -2126,6 +2136,7 @@ class WalletViewSet(viewsets.ViewSet):
         POST /wallet/deposit/
         Body: { "client_id": 1, "amount": 1000, "payment_method": "cash", "notes": "..." }
         """
+        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         client_id = request.data.get('client_id')
         amount = request.data.get('amount')
         notes = request.data.get('notes', '')
@@ -2249,6 +2260,7 @@ class WalletViewSet(viewsets.ViewSet):
         POST /wallet/pay-invoice/
         Body: { "facture_id": 1, "amount": 1000, "notes": "..." }
         """
+        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         facture_id = request.data.get('facture_id')
         amount = request.data.get('amount')
         notes = request.data.get('notes', '')
@@ -2331,7 +2343,7 @@ class WalletViewSet(viewsets.ViewSet):
                 paiement = Paiement.objects.create(
                     facture=facture,
                     amount=amount,
-                    method='wallet',  # ✅ Méthode 'wallet' ajoutée dans les choix
+                    method='wallet',
                     reference=f"WALLET-{facture.invoice_number}-{timezone.now().strftime('%Y%m%d%H%M%S')}",
                     notes=f"Paiement via wallet - {notes or ''}",
                     received_by=request.user
@@ -2417,6 +2429,7 @@ class WalletViewSet(viewsets.ViewSet):
         POST /wallet/pay-all-unpaid/
         Body: { "client_id": 1, "notes": "..." }
         """
+        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         client_id = request.data.get('client_id')
         notes = request.data.get(
             'notes', 'Paiement de toutes les factures impayées')
@@ -2574,6 +2587,7 @@ class WalletViewSet(viewsets.ViewSet):
         Historique des transactions du wallet d'un client
         GET /wallet/{client_id}/transactions/
         """
+        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         try:
             client = Client.objects.get(id=pk)
             wallet, created = ClientWallet.objects.get_or_create(client=client)
@@ -2627,7 +2641,8 @@ class WalletViewSet(viewsets.ViewSet):
         Admin : Statistiques globales des wallets
         GET /wallet/stats/
         """
-        if not request.user.is_staff:
+        # ✅ CORRECTION : Vérifier le rôle admin
+        if not self._is_admin(request.user):
             return Response(
                 {"error": "Permission non accordée"},
                 status=status.HTTP_403_FORBIDDEN
@@ -2671,7 +2686,8 @@ class WalletViewSet(viewsets.ViewSet):
         POST /wallet/{wallet_id}/adjust-balance/
         Body: { "amount": 1000, "type": "credit"|"debit", "notes": "..." }
         """
-        if not request.user.is_staff:
+        # ✅ CORRECTION : Vérifier le rôle admin
+        if not self._is_admin(request.user):
             return Response(
                 {"error": "Permission non accordée. Réservé aux administrateurs."},
                 status=status.HTTP_403_FORBIDDEN
@@ -2764,7 +2780,8 @@ class WalletViewSet(viewsets.ViewSet):
         POST /wallet/{wallet_id}/toggle-status/
         Body: { "is_active": true/false }
         """
-        if not request.user.is_staff:
+        # ✅ CORRECTION : Vérifier le rôle admin
+        if not self._is_admin(request.user):
             return Response(
                 {"error": "Permission non accordée. Réservé aux administrateurs."},
                 status=status.HTTP_403_FORBIDDEN
@@ -2815,6 +2832,7 @@ class WalletViewSet(viewsets.ViewSet):
         Vérifie si un client a un wallet
         GET /wallet/{client_id}/has-wallet/
         """
+        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         try:
             client = Client.objects.get(id=pk)
             has_wallet = hasattr(client, 'wallet')
@@ -2849,6 +2867,7 @@ class WalletViewSet(viewsets.ViewSet):
         Récupère un wallet spécifique par son ID
         GET /wallet/{wallet_id}/get-wallet/
         """
+        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         try:
             wallet = ClientWallet.objects.select_related('client').get(id=pk)
 
