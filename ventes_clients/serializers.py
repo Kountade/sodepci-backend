@@ -798,42 +798,101 @@ class PaiementSerializer(serializers.ModelSerializer):
             return obj.qr_code.url
         return None
 
+# apps/ventes_clients/serializers.py
+
 
 class PaiementCreateSerializer(serializers.ModelSerializer):
+    """
+    Sérialiseur pour la création d'un paiement
+    """
     class Meta:
         model = Paiement
         fields = [
             'facture', 'amount', 'method', 'reference', 'notes',
             'caisse_destination', 'compte_destination'
         ]
+        extra_kwargs = {
+            'method': {
+                'error_messages': {
+                    'invalid_choice': 'Méthode de paiement invalide. Choisissez parmi: cash, card, check, transfer, mobile_money, credit, wallet'
+                }
+            }
+        }
 
     def validate_amount(self, value):
         if value <= 0:
             raise serializers.ValidationError(
-                "Le montant doit être supérieur à 0")
+                "Le montant doit être supérieur à 0"
+            )
+        return value
+
+    def validate_method(self, value):
+        """
+        Valide que la méthode de paiement est valide
+        """
+        valid_methods = ['cash', 'card', 'check',
+                         'transfer', 'mobile_money', 'credit', 'wallet']
+        if value not in valid_methods:
+            raise serializers.ValidationError(
+                f"Méthode de paiement invalide. Choisissez parmi: {', '.join(valid_methods)}"
+            )
         return value
 
     def validate(self, data):
         facture = data.get('facture')
         amount = data.get('amount', 0)
+        method = data.get('method')
 
-        if facture and amount > facture.remaining_amount:
+        # Vérifier que la facture existe
+        if not facture:
+            raise serializers.ValidationError(
+                {"facture": "La facture est requise"}
+            )
+
+        # Vérifier le montant restant
+        if amount > facture.remaining_amount:
             raise serializers.ValidationError(
                 {"amount": f"Le montant dépasse le solde restant ({facture.remaining_amount:,.0f} FCFA)"}
             )
 
+        # Vérifier la destination unique
         caisse = data.get('caisse_destination')
         compte = data.get('compte_destination')
+
         if caisse and compte:
             raise serializers.ValidationError(
                 "Choisissez une seule destination (caisse ou compte)."
             )
-        return data
 
+        # Si méthode wallet, pas besoin de destination
+        if method == 'wallet':
+            # Le wallet ne nécessite pas de destination
+            pass
+        else:
+            # Pour les autres méthodes, vérifier qu'il y a une destination
+            if not caisse and not compte:
+                raise serializers.ValidationError(
+                    "Veuillez spécifier une destination (caisse ou compte) pour le paiement."
+                )
+
+            # Vérifier que la destination appartient au bon entrepôt
+            if facture and facture.sale and facture.sale.warehouse:
+                warehouse = facture.sale.warehouse
+                if caisse and caisse.warehouse != warehouse:
+                    raise serializers.ValidationError(
+                        {"caisse_destination": "La caisse choisie n'appartient pas à l'entrepôt de la vente."}
+                    )
+                if compte and compte.warehouse != warehouse:
+                    raise serializers.ValidationError(
+                        {"compte_destination": "Le compte bancaire choisi n'appartient pas à l'entrepôt de la vente."}
+                    )
+
+        return data
 
 # ============================================================
 # AVOIR
 # ============================================================
+
 
 class AvoirSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.name', read_only=True)
@@ -989,18 +1048,34 @@ class DevisStatsSerializer(serializers.Serializer):
 # WALLET SERIALIZERS
 # ============================================================
 
+# apps/ventes_clients/serializers.py - Modifier ClientWalletSerializer
+
 class ClientWalletSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.name', read_only=True)
     client_code = serializers.CharField(source='client.code', read_only=True)
+    client_phone = serializers.CharField(source='client.phone', read_only=True)
+    client_type = serializers.CharField(source='client.type', read_only=True)
+    client_statut = serializers.CharField(
+        source='client.statut', read_only=True)
     balance_display = serializers.SerializerMethodField()
 
     class Meta:
         model = ClientWallet
         fields = [
-            'id', 'client', 'client_name', 'client_code',
-            'balance', 'balance_display',
-            'total_deposits', 'total_used',
-            'is_active', 'created_at', 'updated_at'
+            'id',
+            'client',
+            'client_name',
+            'client_code',
+            'client_phone',
+            'client_type',
+            'client_statut',
+            'balance',
+            'balance_display',
+            'total_deposits',
+            'total_used',
+            'is_active',
+            'created_at',
+            'updated_at'
         ]
         read_only_fields = ['id', 'balance', 'total_deposits', 'total_used']
 
