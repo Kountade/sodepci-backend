@@ -364,6 +364,11 @@ class TresorerieJournaliereSerializer(serializers.ModelSerializer):
     total_entrees_formate = serializers.SerializerMethodField()
     total_sorties_formate = serializers.SerializerMethodField()
 
+    # ✅ NOUVEAUX CHAMPS DÉTAILLÉS
+    frais_details = serializers.SerializerMethodField()
+    entrees_details = serializers.SerializerMethodField()
+    sorties_details = serializers.SerializerMethodField()
+
     class Meta:
         model = TresorerieJournaliere
         fields = [
@@ -376,6 +381,8 @@ class TresorerieJournaliereSerializer(serializers.ModelSerializer):
             'sorties_achats', 'sorties_frais', 'sorties_salaires', 'sorties_autres',
             'nb_operations', 'nb_entrees', 'nb_sorties',
             'variation', 'variation_formate',
+            # ✅ Détails
+            'frais_details', 'entrees_details', 'sorties_details',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
@@ -395,6 +402,29 @@ class TresorerieJournaliereSerializer(serializers.ModelSerializer):
     def get_total_sorties_formate(self, obj):
         return f"{obj.total_sorties:,.0f} FCFA"
 
+    def _serialize_mouvements(self, mouvements):
+        """Sérialise une liste de dictionnaires de mouvements"""
+        result = []
+        for m in mouvements:
+            item = {}
+            for k, v in m.items():
+                if hasattr(v, 'strftime'):
+                    item[k] = v.strftime('%Y-%m-%d %H:%M')
+                elif hasattr(v, '__float__') and not isinstance(v, (str, int)):
+                    item[k] = str(v)
+                else:
+                    item[k] = v
+            result.append(item)
+        return result
+
+    def get_frais_details(self, obj):
+        return self._serialize_mouvements(obj.get_frais_du_jour())
+
+    def get_entrees_details(self, obj):
+        return self._serialize_mouvements(obj.get_entrees_du_jour())
+
+    def get_sorties_details(self, obj):
+        return self._serialize_mouvements(obj.get_sorties_du_jour())
 
 # ----------------------------------------------
 # 10. DASHBOARD TRÉSORERIE
@@ -403,6 +433,7 @@ class TresorerieJournaliereSerializer(serializers.ModelSerializer):
 # Modifier la méthode to_representation de TresorerieDashboardSerializer
 
 # apps/tresorerie/serializers.py - Partie TresorerieDashboardSerializer COMPLETE
+
 
 class TresorerieDashboardSerializer(serializers.Serializer):
     """

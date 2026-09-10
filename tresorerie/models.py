@@ -215,8 +215,6 @@ class CompteBancaire(models.Model):
 # ============================================================
 # 3. MOUVEMENTS DE TRÉSORERIE
 # ============================================================
-# apps/tresorerie/models.py
-# Partie MouvementTresorerie - COMPLÈTEMENT CORRIGÉ
 
 class MouvementTresorerie(models.Model):
     """Mouvement de trésorerie"""
@@ -226,7 +224,7 @@ class MouvementTresorerie(models.Model):
     type_mouvement = models.CharField(
         max_length=20, choices=TYPE_MOUVEMENT, verbose_name="Type de mouvement")
 
-    # ✅ CORRECTION : warehouse peut être null pour les paiements sans entrepôt
+    # ✅ warehouse peut être null pour les paiements sans entrepôt
     warehouse = models.ForeignKey(
         Warehouse,
         on_delete=models.PROTECT,
@@ -355,13 +353,53 @@ class MouvementTresorerie(models.Model):
             except:
                 return None
         return None
-# ============================================================
-# 4. FRAIS ET DÉPENSES (CORRIGÉ - Utilise MODE_PAIEMENT défini plus haut)
-# ============================================================
+
+    @property
+    def est_encaissement(self):
+        return self.type_mouvement == 'encaissement'
+
+    @property
+    def est_decaissement(self):
+        return self.type_mouvement == 'decaissement'
+
+    @property
+    def est_transfert(self):
+        return self.source_type in ('caisse', 'compte_bancaire')
+
+    def valider(self, user=None):
+        """Valide le mouvement et met à jour les soldes"""
+        if self.status == 'effectue':
+            return False
+        self.status = 'effectue'
+        if user:
+            self.valide_par = user
+        self.date_validation = timezone.now()
+        self.save()
+        self._mettre_a_jour_soldes()
+        return True
+
+    def annuler(self, user=None):
+        """Annule le mouvement et met à jour les soldes"""
+        if self.status == 'annule':
+            return False
+        old_status = self.status
+        self.status = 'annule'
+        self.save()
+        if old_status == 'effectue':
+            self._mettre_a_jour_soldes()
+        return True
+
+    def _mettre_a_jour_soldes(self):
+        """Met à jour les soldes de la caisse et/ou du compte bancaire"""
+        if self.caisse:
+            self.caisse.mettre_a_jour_solde()
+        if self.compte_bancaire:
+            self.compte_bancaire.mettre_a_jour_solde()
 
 
-# apps/tresorerie/models.py
-# Partie Frais - COMPLÈTE ET CORRIGÉE
+# ============================================================
+# 4. FRAIS ET DÉPENSES (CORRIGÉ)
+# ============================================================
 
 class Frais(models.Model):
     """Frais et dépenses diverses"""
@@ -411,7 +449,7 @@ class Frais(models.Model):
     mode_paiement = models.CharField(
         max_length=20, choices=MODE_PAIEMENT, default='especes', verbose_name="Mode de paiement")
 
-    # ⚠️ UTILISATION D'IntegerField
+    # ⚠️ UTILISATION D'IntegerField pour éviter les imports circulaires
     mouvement_id = models.IntegerField(
         null=True, blank=True, verbose_name="ID Mouvement associé")
     supplier_id = models.IntegerField(
@@ -438,9 +476,13 @@ class Frais(models.Model):
         return f"{self.reference} - {self.titre} ({self.montant:,.0f} XOF)"
 
     def save(self, *args, **kwargs):
-        # ✅ Vérifier que ValidationError est importé
+        """
+        ✅ CORRECTION : On sauvegarde d'abord l'objet pour avoir un ID,
+        puis on crée le mouvement associé avec le bon source_id.
+        """
         from django.core.exceptions import ValidationError
 
+        # ---- 1. Génération de la référence ----
         if not self.reference:
             from datetime import datetime
             prefix = f"FRAIS{datetime.now().strftime('%Y%m')}"
@@ -455,13 +497,16 @@ class Frais(models.Model):
             else:
                 self.reference = f"{prefix}0001"
 
+        # ---- 2. Premier save pour obtenir un ID valide ----
+        super().save(*args, **kwargs)
+
+        # ---- 3. Créer le mouvement si le frais est payé ----
         if self.status == 'paye' and not self.mouvement_id:
             from .models import MouvementTresorerie, Caisse
 
             caisse_defaut = Caisse.objects.filter(
                 warehouse=self.warehouse, is_default=True).first()
             if not caisse_defaut:
-                # ✅ ValidationError est maintenant défini
                 raise ValidationError(
                     f"Aucune caisse par défaut pour l'entrepôt '{self.warehouse.name}'. "
                     "Veuillez configurer une caisse par défaut."
@@ -471,7 +516,7 @@ class Frais(models.Model):
                 type_mouvement='decaissement',
                 warehouse=self.warehouse,
                 source_type='frais',
-                source_id=self.id,
+                source_id=self.id,  # ✅ Maintenant valide !
                 source_reference=self.reference,
                 montant=self.montant,
                 mode_paiement=self.mode_paiement,
@@ -483,10 +528,11 @@ class Frais(models.Model):
                 created_by=self.created_by
             )
             self.mouvement_id = mouvement.id
-
-        super().save(*args, **kwargs)
+            # Re-sauvegarder pour persister mouvement_id
+            super().save(update_fields=['mouvement_id'])
 
     def get_supplier(self):
+        """Récupère le fournisseur associé (import différé)"""
         if self.supplier_id:
             try:
                 from achats_fournisseurs.models import Supplier
@@ -495,10 +541,19 @@ class Frais(models.Model):
                 return None
         return None
 
+    def get_mouvement(self):
+        """Récupère le mouvement de trésorerie associé"""
+        if self.mouvement_id:
+            try:
+                return MouvementTresorerie.objects.get(id=self.mouvement_id)
+            except MouvementTresorerie.DoesNotExist:
+                return None
+        return None
+
+
 # ============================================================
 # 5. PRÉVISIONS DE TRÉSORERIE
 # ============================================================
-
 
 class PrevisionTresorerie(models.Model):
     """Prévision de trésorerie"""
@@ -650,6 +705,10 @@ class RapprochementBancaire(models.Model):
     def __str__(self):
         return f"{self.reference} - {self.compte_bancaire.banque} ({self.date_debut} au {self.date_fin})"
 
+    @property
+    def est_rapproche(self):
+        return self.status == 'complete' and abs(self.ecart) < 1
+
     def save(self, *args, **kwargs):
         if not self.reference:
             from datetime import datetime
@@ -672,10 +731,8 @@ class RapprochementBancaire(models.Model):
 
 
 # ============================================================
-# 7. TRÉSORERIE JOURNALIÈRE
+# 7. TRÉSORERIE JOURNALIÈRE (COMPLET AVEC MÉTHODES DÉTAILLÉES)
 # ============================================================
-
-# apps/tresorerie/models.py - Partie TresorerieJournaliere COMPLETE
 
 class TresorerieJournaliere(models.Model):
     """Suivi journalier de la trésorerie"""
@@ -754,6 +811,100 @@ class TresorerieJournaliere(models.Model):
     @property
     def variation(self):
         return self.solde_fermeture - self.solde_ouverture
+
+    # =========================================================
+    # MÉTHODES DÉTAILLÉES POUR LE DÉTAIL / PDF
+    # =========================================================
+
+    def get_mouvements_du_jour(self):
+        """Retourne tous les mouvements effectués du jour pour cet entrepôt"""
+        return MouvementTresorerie.objects.filter(
+            warehouse=self.warehouse,
+            date_mouvement__date=self.date,
+            status='effectue'
+        ).select_related('caisse', 'compte_bancaire', 'created_by').order_by('date_mouvement')
+
+    def get_frais_du_jour(self):
+        """Retourne les détails complets des frais du jour"""
+        frais_list = []
+        mouvements = self.get_mouvements_du_jour().filter(
+            type_mouvement='decaissement',
+            source_type='frais'
+        )
+        for mvt in mouvements:
+            frais_data = {
+                'mouvement_reference': mvt.reference,
+                'source_reference': mvt.source_reference or '-',
+                'libelle': mvt.libelle,
+                'montant': mvt.montant,
+                'mode_paiement': mvt.get_mode_paiement_display(),
+                'date_mouvement': mvt.date_mouvement,
+                'caisse': mvt.caisse.nom if mvt.caisse else '-',
+                'compte_bancaire': mvt.compte_bancaire.nom if mvt.compte_bancaire else '-',
+                'created_by': mvt.created_by.full_name if mvt.created_by else '-',
+                'titre': None,
+                'categorie': None,
+                'beneficiaire': None,
+                'piece_justificative': None,
+            }
+            # Enrichir avec les infos du Frais source
+            if mvt.source_id:
+                try:
+                    frais = Frais.objects.get(id=mvt.source_id)
+                    frais_data.update({
+                        'titre': frais.titre,
+                        'categorie': frais.get_categorie_display(),
+                        'beneficiaire': frais.beneficiaire,
+                        'piece_justificative': frais.piece_justificative,
+                    })
+                except Frais.DoesNotExist:
+                    pass
+            frais_list.append(frais_data)
+        return frais_list
+
+    def get_entrees_du_jour(self):
+        """Retourne le détail des entrées du jour"""
+        entrees_list = []
+        mouvements = self.get_mouvements_du_jour().filter(
+            type_mouvement='encaissement'
+        )
+        for mvt in mouvements:
+            entrees_list.append({
+                'mouvement_reference': mvt.reference,
+                'source_reference': mvt.source_reference or '-',
+                'source_type': mvt.get_source_type_display(),
+                'libelle': mvt.libelle,
+                'montant': mvt.montant,
+                'mode_paiement': mvt.get_mode_paiement_display(),
+                'date_mouvement': mvt.date_mouvement,
+                'caisse': mvt.caisse.nom if mvt.caisse else '-',
+                'compte_bancaire': mvt.compte_bancaire.nom if mvt.compte_bancaire else '-',
+            })
+        return entrees_list
+
+    def get_sorties_du_jour(self):
+        """Retourne le détail des sorties du jour (hors frais déjà listés séparément)"""
+        sorties_list = []
+        mouvements = self.get_mouvements_du_jour().filter(
+            type_mouvement='decaissement'
+        ).exclude(source_type='frais')
+        for mvt in mouvements:
+            sorties_list.append({
+                'mouvement_reference': mvt.reference,
+                'source_reference': mvt.source_reference or '-',
+                'source_type': mvt.get_source_type_display(),
+                'libelle': mvt.libelle,
+                'montant': mvt.montant,
+                'mode_paiement': mvt.get_mode_paiement_display(),
+                'date_mouvement': mvt.date_mouvement,
+                'caisse': mvt.caisse.nom if mvt.caisse else '-',
+                'compte_bancaire': mvt.compte_bancaire.nom if mvt.compte_bancaire else '-',
+            })
+        return sorties_list
+
+    # =========================================================
+    # GÉNÉRATION JOURNALIÈRE
+    # =========================================================
 
     def generer_journaliere(self, date_jour):
         """
