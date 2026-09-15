@@ -1737,34 +1737,48 @@ class PaiementViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = (
+            Paiement.objects
+            .select_related(
+                'facture',
+                'facture__client',
+                'facture__sale',
+                'received_by',
+                'caisse_destination',
+                'compte_destination',
+            )
+            .order_by('-payment_date')
+        )
         facture_id = self.request.query_params.get('facture')
         if facture_id:
             queryset = queryset.filter(facture_id=facture_id)
+
+        method = self.request.query_params.get('method')
+        if method and method != 'all':
+            queryset = queryset.filter(method=method)
+
+        date_from = self.request.query_params.get('date_from')
+        if date_from:
+            queryset = queryset.filter(payment_date__date__gte=date_from)
+
+        date_to = self.request.query_params.get('date_to')
+        if date_to:
+            queryset = queryset.filter(payment_date__date__lte=date_to)
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(facture__invoice_number__icontains=search) |
+                Q(facture__client__name__icontains=search) |
+                Q(reference__icontains=search)
+            )
         return queryset
-
-    def perform_create(self, serializer):
-        paiement = serializer.save(received_by=self.request.user)
-        paiement.generate_qr_code()
-        paiement.save()
-        logger.info(
-            f"🔔 PaiementViewSet.perform_create - paiement {paiement.id}")
-
-        # ✨ Création manuelle du mouvement de trésorerie
-        facture = paiement.facture
-        if facture:
-            mouvement = creer_mouvement_paiement_manuel(
-                paiement, facture, self.request.user)
-            if mouvement:
-                logger.info(
-                    f"✅ Mouvement créé dans perform_create : {mouvement.reference}")
-            else:
-                logger.warning("⚠️ Aucun mouvement créé dans perform_create")
-
 
 # ============================================================
 # AVOIR VIEWSET
 # ============================================================
+
+
 class AvoirViewSet(viewsets.ModelViewSet):
     queryset = Avoir.objects.all()
     permission_classes = [permissions.IsAuthenticated]
