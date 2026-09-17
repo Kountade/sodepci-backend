@@ -1816,7 +1816,7 @@ class Paiement(models.Model):
         ("transfer", "Virement"),
         ("mobile_money", "Mobile Money"),
         ("credit", "Crédit"),
-         ("wallet", "Porte-monnaie électronique"), 
+        ("wallet", "Porte-monnaie électronique"),
     )
 
     facture = models.ForeignKey(
@@ -2027,91 +2027,278 @@ class Paiement(models.Model):
 # AVOIR
 # ============================================================
 
-class Avoir(models.Model):
+# apps/ventes_clients/models.py
 
+
+class Avoir(models.Model):
+    """
+    Avoir client (note de crédit)
+
+    Représente une créance de l'entreprise envers le client.
+    Un avoir peut être émis pour :
+    - Un remboursement (refund)
+    - Un retour de marchandise (return) — restaure le stock
+    - Une remise / geste commercial (discount)
+    - Une erreur de facturation (error)
+    """
+
+    # ============================================================
+    # TYPES D'AVOIR
+    # ============================================================
     TYPE_CHOICES = (
-        ("credit", "Avoir"),
-        ("debit", "Note de débit"),
+        ("refund", "Remboursement"),
+        ("return", "Retour de marchandise"),
+        ("discount", "Remise / Geste commercial"),
+        ("error", "Erreur de facturation"),
     )
 
+    # ============================================================
+    # NUMÉRO UNIQUE
+    # ============================================================
     avoir_number = models.CharField(
         max_length=50,
-        unique=True
+        unique=True,
+        verbose_name="Numéro d'avoir"
     )
 
+    # ============================================================
+    # VENTE ASSOCIÉE (optionnelle)
+    # ============================================================
     sale = models.ForeignKey(
         Vente,
-        on_delete=models.CASCADE,
-        related_name="credits"
+        on_delete=models.SET_NULL,   # ✅ Changé de CASCADE à SET_NULL
+        null=True,                    # ✅ Ajouté
+        blank=True,                   # ✅ Ajouté
+        related_name="avoirs",        # ✅ Renommé pour cohérence
+        verbose_name="Vente associée"
     )
 
+    # ============================================================
+    # CLIENT
+    # ============================================================
     client = models.ForeignKey(
         Client,
         on_delete=models.PROTECT,
-        related_name="credits"
+        related_name="avoirs",        # ✅ Renommé
+        verbose_name="Client"
     )
 
+    # ============================================================
+    # TYPE D'AVOIR
+    # ============================================================
     type = models.CharField(
         max_length=20,
         choices=TYPE_CHOICES,
-        default="credit"
+        default="refund",
+        verbose_name="Type d'avoir"
     )
 
+    # ============================================================
+    # MONTANT
+    # ============================================================
     amount = models.DecimalField(
         max_digits=12,
-        decimal_places=2
+        decimal_places=2,
+        verbose_name="Montant"
     )
 
-    reason = models.TextField()
+    # ============================================================
+    # RAISON
+    # ============================================================
+    reason = models.TextField(
+        verbose_name="Raison",
+        help_text="Motif de l'avoir (retour, remboursement, etc.)"
+    )
 
+    # ============================================================
+    # DATE
+    # ============================================================
     date = models.DateField(
-        auto_now_add=True
+        auto_now_add=True,
+        verbose_name="Date"
     )
 
+    # ============================================================
+    # NOTES
+    # ============================================================
     notes = models.TextField(
-        blank=True
+        blank=True,
+        verbose_name="Notes internes"
     )
 
+    # ============================================================
+    # ✅ NOUVEAU : RESTAURATION DU STOCK
+    # ============================================================
+    restore_stock = models.BooleanField(
+        default=False,
+        verbose_name="Stock restauré",
+        help_text="Indique si le stock a été restauré suite à cet avoir"
+    )
+
+    stock_restored_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date de restauration du stock"
+    )
+
+    # ============================================================
+    # MÉTADONNÉES
+    # ============================================================
     created_by = models.ForeignKey(
         CustomUser,
         on_delete=models.SET_NULL,
         null=True,
-        blank=True
+        blank=True,
+        related_name="avoirs_created",
+        verbose_name="Créé par"
     )
 
     created_at = models.DateTimeField(
-        auto_now_add=True
+        auto_now_add=True,
+        verbose_name="Créé le"
     )
 
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name="Modifié le"
+    )
+
+    # ============================================================
+    # MÉTA
+    # ============================================================
     class Meta:
         verbose_name = "Avoir"
         verbose_name_plural = "Avoirs"
-        ordering = ["-date"]
+        ordering = ["-date", "-id"]
+        indexes = [
+            models.Index(fields=["avoir_number"]),
+            models.Index(fields=["client", "-date"]),
+            models.Index(fields=["type"]),
+        ]
 
+    # ============================================================
+    # MÉTHODES
+    # ============================================================
     def __str__(self):
-
         return (
             f"{self.avoir_number} - "
             f"{self.client.name} - "
-            f"{self.amount} FCFA"
+            f"{self.amount:,.0f} FCFA"
         )
 
     def save(self, *args, **kwargs):
-
+        """Génération automatique du numéro d'avoir"""
         if not self.avoir_number:
-
             self.avoir_number = generate_number(
                 Avoir,
                 "avoir_number",
                 "AV"
             )
-
         super().save(*args, **kwargs)
 
+    # ------------------------------------------------------------
+    # PROPRIÉTÉS UTILITAIRES
+    # ------------------------------------------------------------
+    @property
+    def type_display(self):
+        """Retourne le libellé du type (ex: 'Remboursement')"""
+        return self.get_type_display()
+
+    @property
+    def is_refund(self):
+        """Vrai si c'est un remboursement"""
+        return self.type == "refund"
+
+    @property
+    def is_return(self):
+        """Vrai si c'est un retour de marchandise"""
+        return self.type == "return"
+
+    @property
+    def can_restore_stock(self):
+        """
+        Indique si cet avoir peut déclencher une restauration de stock.
+
+        Conditions :
+        - Une vente doit être associée
+        - Le type doit être 'refund' ou 'return'
+        - Le stock ne doit pas déjà avoir été restauré
+        """
+        return (
+            self.sale is not None
+            and self.type in ["refund", "return"]
+            and not self.restore_stock
+        )
+
+    # ------------------------------------------------------------
+    # ACTIONS
+    # ------------------------------------------------------------
+    def restore_sale_stock(self, user=None):
+        """
+        Restaure le stock de la vente associée.
+
+        Retourne un dict avec le résultat :
+        {
+            'success': bool,
+            'message': str,
+            'details': list
+        }
+        """
+        from produits_stocks.models import Stock, StockMovement
+
+        if not self.can_restore_stock:
+            return {
+                "success": False,
+                "message": "Restauration impossible (déjà effectuée ou type invalide)",
+                "details": []
+            }
+
+        try:
+            # Restaurer le stock via la méthode du modèle Vente
+            self.sale.restore_stock()
+
+            # Créer les StockMovement pour la traçabilité
+            details = []
+            for line in self.sale.lines.all():
+                movement = StockMovement.objects.create(
+                    product=line.product,
+                    warehouse=self.sale.warehouse,
+                    movement_type="in",
+                    quantity=line.quantity,
+                    reference_type="sale",
+                    reference_id=self.sale.id,
+                    notes=f"Retour via avoir {self.avoir_number} - {self.reason}",
+                    created_by=user
+                )
+                details.append({
+                    "product": line.product.name,
+                    "quantity": line.quantity,
+                    "movement_id": movement.id
+                })
+
+            # Marquer comme restauré
+            self.restore_stock = True
+            self.stock_restored_at = timezone.now()
+            self.save(update_fields=["restore_stock",
+                      "stock_restored_at", "updated_at"])
+
+            return {
+                "success": True,
+                "message": f"Stock restauré pour la vente {self.sale.invoice_number}",
+                "details": details
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Erreur lors de la restauration : {str(e)}",
+                "details": []
+            }
 
 # ============================================================
 # TAXE
 # ============================================================
+
 
 class Taxe(models.Model):
 
