@@ -1348,6 +1348,9 @@ class VenteViewSet(viewsets.ModelViewSet):
 # ============================================================
 # FACTURE VIEWSET
 # ============================================================
+# ============================================================
+# FACTURE VIEWSET - COMPLET AVEC RECHERCHE OPTIMISÉE
+# ============================================================
 class FactureViewSet(viewsets.ModelViewSet):
     queryset = Facture.objects.all()
     permission_classes = [permissions.IsAuthenticated]
@@ -1363,7 +1366,7 @@ class FactureViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().select_related('client', 'sale')
         client = self.request.query_params.get('client')
         if client:
             queryset = queryset.filter(client_id=client)
@@ -1387,7 +1390,64 @@ class FactureViewSet(viewsets.ModelViewSet):
         return queryset
 
     # ================================================================
-    # ✅ Récupérer les factures impayées d'un client
+    # ✅ RECHERCHE OPTIMISÉE POUR LE FORMULAIRE DE PAIEMENT
+    # ================================================================
+    @action(detail=False, methods=['get'], url_path='search-unpaid')
+    def search_unpaid(self, request):
+        """
+        Recherche paginée de factures impayées pour le formulaire de paiement.
+
+        GET /factures/search-unpaid/?q=client&client_id=1&limit=20
+
+        Paramètres :
+        - q          : recherche texte (n° facture, nom client, code client, téléphone)
+        - client_id  : filtrer par client spécifique
+        - limit      : nombre max de résultats (défaut 20, max 50)
+        - status     : statuts à inclure (défaut: sent,overdue,partial)
+        """
+        query = request.query_params.get('q', '').strip()
+        client_id = request.query_params.get('client_id')
+        try:
+            limit = min(int(request.query_params.get('limit', 20)), 50)
+        except (TypeError, ValueError):
+            limit = 20
+
+        status_param = request.query_params.get(
+            'status', 'sent,overdue,partial')
+        statuses = [s.strip() for s in status_param.split(',') if s.strip()]
+
+        # Base : factures non payées
+        qs = Facture.objects.select_related('client', 'sale').filter(
+            status__in=statuses
+        ).exclude(status='paid').order_by('due_date')
+
+        # Filtre par client spécifique
+        if client_id:
+            qs = qs.filter(client_id=client_id)
+
+        # Recherche texte
+        if query:
+            qs = qs.filter(
+                Q(invoice_number__icontains=query) |
+                Q(client__name__icontains=query) |
+                Q(client__code__icontains=query) |
+                Q(client__phone__icontains=query)
+            )
+
+        # Filtrer uniquement celles avec un reste à payer > 0
+        factures = [f for f in qs if f.remaining_amount > 0][:limit]
+
+        serializer = FactureSerializer(
+            factures, many=True, context={'request': request}
+        )
+
+        return Response({
+            'count': len(factures),
+            'results': serializer.data
+        })
+
+    # ================================================================
+    # ✅ Récupérer les factures impayées d'un client (ancien endpoint)
     # ================================================================
     @action(detail=False, methods=['get'], url_path='unpaid')
     def unpaid_invoices(self, request):
@@ -1402,7 +1462,6 @@ class FactureViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Statuts des factures non payées
         unpaid_statuses = ['sent', 'overdue', 'partial']
 
         factures = Facture.objects.filter(
@@ -1410,7 +1469,6 @@ class FactureViewSet(viewsets.ModelViewSet):
             status__in=unpaid_statuses
         ).order_by('due_date')
 
-        # Filtrer celles qui ont un reste à payer
         factures_impayees = [
             f for f in factures if f.remaining_amount > 0
         ]
@@ -1423,6 +1481,49 @@ class FactureViewSet(viewsets.ModelViewSet):
 
         return Response(serializer.data)
 
+    # ================================================================
+    # ✅ Récupérer les stats de factures d'un client (pour dashboard)
+    # ================================================================
+    @action(detail=False, methods=['get'], url_path='client-stats')
+    def client_stats(self, request):
+        """
+        Statistiques de facturation pour un client.
+        GET /factures/client-stats/?client_id=1
+        """
+        client_id = request.query_params.get('client_id')
+        if not client_id:
+            return Response(
+                {"error": "Le paramètre client_id est requis"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        factures = Facture.objects.filter(client_id=client_id)
+
+        total_factures = factures.count()
+        total_montant = factures.aggregate(
+            total=Sum('total'))['total'] or Decimal('0')
+        total_paye = factures.aggregate(
+            total=Sum('amount_paid'))['total'] or Decimal('0')
+        total_impaye = total_montant - total_paye
+
+        par_statut = {}
+        for status_choice in Facture.STATUS_CHOICES:
+            status_code = status_choice[0]
+            count = factures.filter(status=status_code).count()
+            if count > 0:
+                par_statut[status_code] = count
+
+        return Response({
+            'total_factures': total_factures,
+            'total_montant': total_montant,
+            'total_paye': total_paye,
+            'total_impaye': total_impaye,
+            'par_statut': par_statut,
+        })
+
+    # ================================================================
+    # ENREGISTRER UN PAIEMENT SUR UNE FACTURE
+    # ================================================================
     @action(detail=True, methods=['post'])
     def register_payment(self, request, pk=None):
         from decimal import Decimal
@@ -1497,7 +1598,7 @@ class FactureViewSet(viewsets.ModelViewSet):
                 logger.info(
                     f"   Vente associée : {sale.invoice_number}, warehouse={sale.warehouse}")
 
-            # 4. ✨ CRÉATION MANUELLE DU MOUVEMENT
+            # 4. ✨ CRÉATION MANUELLE DU MOUVEMENT DE TRÉSORERIE
             mouvement = creer_mouvement_paiement_manuel(
                 paiement, facture, request.user)
 
@@ -1517,6 +1618,9 @@ class FactureViewSet(viewsets.ModelViewSet):
             'mouvement_reference': mouvement.reference if mouvement else None
         }, status=status.HTTP_201_CREATED)
 
+    # ================================================================
+    # MARQUER COMME PAYÉE (avec montant optionnel)
+    # ================================================================
     @action(detail=True, methods=['post'])
     def mark_paid(self, request, pk=None):
         from decimal import Decimal
@@ -1599,6 +1703,9 @@ class FactureViewSet(viewsets.ModelViewSet):
             'mouvement_reference': mouvement.reference if mouvement else None
         }, status=status.HTTP_201_CREATED)
 
+    # ================================================================
+    # ENVOYER UNE FACTURE
+    # ================================================================
     @action(detail=True, methods=['post'])
     def send(self, request, pk=None):
         facture = self.get_object()
@@ -1616,6 +1723,9 @@ class FactureViewSet(viewsets.ModelViewSet):
             'message': 'Facture envoyée avec succès'
         })
 
+    # ================================================================
+    # ANNULER UNE FACTURE
+    # ================================================================
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         facture = self.get_object()
@@ -1631,6 +1741,9 @@ class FactureViewSet(viewsets.ModelViewSet):
             'message': 'Facture annulée avec succès'
         })
 
+    # ================================================================
+    # GÉNÉRER UNE FACTURE DEPUIS UNE VENTE
+    # ================================================================
     @action(detail=True, methods=['post'])
     def generate_invoice(self, request, pk=None):
         from django.db import transaction
@@ -1698,6 +1811,9 @@ class FactureViewSet(viewsets.ModelViewSet):
             'message': 'Facture générée avec succès'
         }, status=status.HTTP_201_CREATED)
 
+    # ================================================================
+    # GÉNÉRER LE QR CODE
+    # ================================================================
     @action(detail=True, methods=['get'])
     def generate_qr(self, request, pk=None):
         facture = self.get_object()
@@ -1714,6 +1830,9 @@ class FactureViewSet(viewsets.ModelViewSet):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+    # ================================================================
+    # LISTER LES PAIEMENTS D'UNE FACTURE
+    # ================================================================
     @action(detail=True, methods=['get'])
     def paiements(self, request, pk=None):
         facture = self.get_object()
@@ -1722,10 +1841,11 @@ class FactureViewSet(viewsets.ModelViewSet):
             paiements, many=True, context={'request': request})
         return Response(serializer.data)
 
-
 # ============================================================
 # PAIEMENT VIEWSET
 # ============================================================
+
+
 class PaiementViewSet(viewsets.ModelViewSet):
     queryset = Paiement.objects.all()
     serializer_class = PaiementSerializer
