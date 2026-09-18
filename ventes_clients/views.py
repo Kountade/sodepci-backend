@@ -1782,12 +1782,16 @@ class PaiementViewSet(viewsets.ModelViewSet):
 # ============================================================
 # AVOIR VIEWSET - CORRIGÉ AVEC RESTAURATION DU STOCK
 # ============================================================
+# apps/ventes_clients/views.py (extrait — AvoirViewSet complet)
+
 class AvoirViewSet(viewsets.ModelViewSet):
-    queryset = Avoir.objects.all()
+    queryset = Avoir.objects.prefetch_related(
+        "lignes", "lignes__product", "client", "sale"
+    ).all()
     permission_classes = [permissions.IsAuthenticated]
 
     def get_serializer_class(self):
-        if self.action == 'create':
+        if self.action == "create":
             return AvoirCreateSerializer
         return AvoirSerializer
 
@@ -1796,206 +1800,183 @@ class AvoirViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        client = self.request.query_params.get('client')
+
+        client = self.request.query_params.get("client")
         if client:
             queryset = queryset.filter(client_id=client)
+
+        sale = self.request.query_params.get("sale")
+        if sale:
+            queryset = queryset.filter(sale_id=sale)
+
+        avoir_type = self.request.query_params.get("type")
+        if avoir_type:
+            queryset = queryset.filter(type=avoir_type)
+
+        search = self.request.query_params.get("search")
+        if search:
+            queryset = queryset.filter(
+                Q(avoir_number__icontains=search)
+                | Q(client__name__icontains=search)
+                | Q(reason__icontains=search)
+            )
+
         return queryset
 
     # ============================================================
-    # ✅ CRÉATION D'UN AVOIR AVEC RESTAURATION DU STOCK
+    # CRÉATION AVEC RESTAURATION DU STOCK
     # ============================================================
     def create(self, request, *args, **kwargs):
-        """
-        Crée un avoir et restaure le stock si :
-        - Un retour de marchandise est effectué
-        - Le type d'avoir est 'refund' (remboursement) ou 'return' (retour)
-        - Une vente est associée
-
-        POST /avoirs/
-        Body: {
-            "sale": 123,
-            "client": 45,
-            "type": "refund",
-            "amount": 15000,
-            "reason": "Produit défectueux",
-            "restore_stock": true   # ✅ NOUVEAU CHAMP OPTIONNEL
-        }
-        """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        # Récupération des données
-        sale = serializer.validated_data.get('sale')
-        avoir_type = serializer.validated_data.get('type')
-        amount = serializer.validated_data.get('amount')
-        restore_stock = request.data.get('restore_stock', False)
-
-        # Convertir en booléen si c'est une string
+        # Lire restore_stock (bool ou string)
+        restore_stock = request.data.get("restore_stock", False)
         if isinstance(restore_stock, str):
-            restore_stock = restore_stock.lower() == 'true'
+            restore_stock = restore_stock.lower() == "true"
 
         try:
             with transaction.atomic():
-                # 1. Création de l'avoir
+                # 1. CRÉER L'AVOIR + SES LIGNES
                 avoir = serializer.save(created_by=request.user)
 
                 logger.info(
-                    f"✅ Avoir créé : {avoir.avoir_number} - "
-                    f"Type: {avoir_type} - Montant: {amount:,.0f} FCFA"
+                    f"✅ Avoir créé : {avoir.avoir_number} "
+                    f"({avoir.type}) - {avoir.amount:,.0f} FCFA - "
+                    f"{avoir.lignes.count()} ligne(s)"
                 )
 
-                # 2. Restauration du stock si nécessaire
+                # 2. RESTAURER LE STOCK (PRODUITS RETOURNÉS UNIQUEMENT)
                 stock_restored = False
                 stock_details = []
 
-                # Conditions pour restaurer le stock :
-                # - Une vente est associée
-                # - Le type est 'refund' ou 'return'
-                # - L'utilisateur a demandé la restauration (ou par défaut pour refund/return)
                 should_restore = (
-                    sale is not None
-                    and avoir_type in ['refund', 'return']
+                    restore_stock
+                    and avoir.sale is not None
+                    and avoir.type in ["refund", "return"]
+                    and avoir.lignes.exists()
                 )
 
-                if should_restore and (restore_stock or avoir_type in ['refund', 'return']):
-                    try:
-                        # ✅ Vérifier qu'on n'a pas déjà restauré le stock pour cette vente
-                        already_restored = StockMovement.objects.filter(
-                            reference_type='sale',
-                            reference_id=sale.id,
-                            movement_type='in',
-                            notes__icontains='Avoir'
-                        ).exists()
+                if should_restore:
+                    result = avoir.restore_partial_stock(user=request.user)
+                    stock_restored = result["success"]
+                    stock_details = result["details"]
 
-                        if already_restored:
-                            logger.warning(
-                                f"⚠️ Stock déjà restauré pour la vente "
-                                f"{sale.invoice_number} - Avoir ignoré"
-                            )
-                            stock_restored = False
-                        else:
-                            # ✅ Restauration du stock via la méthode du modèle Vente
-                            sale.restore_stock()
+                    if stock_restored:
+                        logger.info(f"📦 {result['message']}")
+                    else:
+                        logger.warning(f"⚠️ {result['message']}")
 
-                            # ✅ Créer un StockMovement pour la traçabilité
-                            for line in sale.lines.all():
-                                movement = StockMovement.objects.create(
-                                    product=line.product,
-                                    warehouse=sale.warehouse,
-                                    movement_type='in',
-                                    quantity=line.quantity,
-                                    reference_type='sale',
-                                    reference_id=sale.id,
-                                    notes=f"Retour via avoir {avoir.avoir_number} - {avoir.reason}",
-                                    created_by=request.user
-                                )
-                                stock_details.append({
-                                    'product': line.product.name,
-                                    'quantity': line.quantity,
-                                    'movement_id': movement.id
-                                })
-
-                            stock_restored = True
-                            logger.info(
-                                f"📦 Stock restauré pour la vente "
-                                f"{sale.invoice_number} via avoir {avoir.avoir_number}"
-                            )
-                            logger.info(
-                                f"   Détails: {len(stock_details)} produit(s) remis en stock"
-                            )
-
-                    except Exception as e:
-                        logger.error(
-                            f"❌ Erreur lors de la restauration du stock : {e}"
-                        )
-                        # On ne bloque pas la création de l'avoir
-                        # mais on log l'erreur
-                        stock_restored = False
-
-                # 3. Créer un mouvement de trésorerie (décaissement)
+                # 3. MOUVEMENT DE TRÉSORERIE (DÉCAISSEMENT)
                 mouvement_tresorerie = None
                 try:
                     from tresorerie.models import MouvementTresorerie, Caisse
 
-                    if sale and sale.warehouse:
+                    if avoir.sale and avoir.sale.warehouse:
                         caisse = Caisse.objects.filter(
-                            warehouse=sale.warehouse,
-                            is_default=True
+                            warehouse=avoir.sale.warehouse,
+                            is_default=True,
                         ).first()
 
                         if not caisse:
                             caisse = Caisse.objects.filter(
-                                warehouse=sale.warehouse,
-                                is_active=True
+                                warehouse=avoir.sale.warehouse,
+                                is_active=True,
                             ).first()
 
                         if caisse:
-                            # Vérifier si un mouvement existe déjà
-                            existing_mvt = MouvementTresorerie.objects.filter(
-                                source_type='avoir',
-                                source_id=avoir.id
+                            existing = MouvementTresorerie.objects.filter(
+                                source_type="avoir",
+                                source_id=avoir.id,
                             ).first()
 
-                            if not existing_mvt:
+                            if not existing:
                                 mouvement_tresorerie = MouvementTresorerie.objects.create(
-                                    type_mouvement='decaissement',
-                                    warehouse=sale.warehouse,
-                                    source_type='avoir',
+                                    type_mouvement="decaissement",
+                                    warehouse=avoir.sale.warehouse,
+                                    source_type="avoir",
                                     source_id=avoir.id,
                                     source_reference=avoir.avoir_number,
-                                    montant=amount,
-                                    mode_paiement='especes',
+                                    montant=avoir.amount,
+                                    mode_paiement="especes",
                                     caisse=caisse,
                                     date_mouvement=timezone.now(),
                                     date_valeur=timezone.now().date(),
-                                    status='effectue',
-                                    libelle=f"Avoir {avoir.avoir_number} - {avoir.reason}",
-                                    created_by=request.user
+                                    status="effectue",
+                                    libelle=f"Avoir {avoir.avoir_number} - {avoir.reason[:100]}",
+                                    created_by=request.user,
                                 )
 
-                                # ✅ Diminuer le solde de la caisse
-                                caisse.solde_actuel -= amount
+                                # Diminuer la caisse
+                                caisse.solde_actuel -= avoir.amount
                                 caisse.save(update_fields=[
-                                            'solde_actuel', 'updated_at'])
+                                            "solde_actuel", "updated_at"])
 
                                 logger.info(
-                                    f"💰 Caisse {caisse.nom} diminuée de "
-                                    f"{amount:,.0f} FCFA (avoir)"
+                                    f"💰 Caisse {caisse.nom} : -{avoir.amount:,.0f} FCFA"
                                 )
+                            else:
+                                mouvement_tresorerie = existing
                 except ImportError:
                     logger.warning("Module tresorerie non disponible")
                 except Exception as e:
-                    logger.error(
-                        f"❌ Erreur création mouvement trésorerie avoir : {e}"
-                    )
+                    logger.error(f"Erreur trésorerie : {e}")
 
-                # 4. Réponse
+                # 4. RÉPONSE
                 return Response({
-                    'status': 'success',
-                    'message': 'Avoir créé avec succès',
-                    'avoir': AvoirSerializer(
-                        avoir, context={'request': request}
-                    ).data,
-                    'stock_restored': stock_restored,
-                    'stock_details': stock_details,
-                    'mouvement_tresorerie_cree': mouvement_tresorerie is not None,
-                    'mouvement_reference': (
-                        mouvement_tresorerie.reference
-                        if mouvement_tresorerie else None
-                    )
+                    "status": "success",
+                    "message": "Avoir créé avec succès",
+                    "avoir": AvoirSerializer(avoir, context={"request": request}).data,
+                    "stock_restored": stock_restored,
+                    "stock_details": stock_details,
+                    "mouvement_tresorerie_cree": mouvement_tresorerie is not None,
+                    "mouvement_reference": (
+                        mouvement_tresorerie.reference if mouvement_tresorerie else None
+                    ),
                 }, status=status.HTTP_201_CREATED)
 
         except Exception as e:
-            logger.exception("Erreur lors de la création de l'avoir")
+            logger.exception("Erreur création avoir")
             return Response(
-                {"error": f"Erreur lors de la création de l'avoir: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": f"Erreur : {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    # ============================================================
+    # ACTION : RESTAURER LE STOCK MANUELLEMENT
+    # ============================================================
+    @action(detail=True, methods=["post"], url_path="restore-stock")
+    def restore_stock_action(self, request, pk=None):
+        avoir = self.get_object()
 
-# ============================================================
-# TAXE VIEWSET
-# ============================================================
+        if avoir.restore_stock:
+            return Response(
+                {"error": "Stock déjà restauré"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not avoir.can_restore_stock:
+            return Response(
+                {"error": "Restauration impossible"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            result = avoir.restore_partial_stock(user=request.user)
+
+        if not result["success"]:
+            return Response(
+                {"error": result["message"]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({
+            "status": "success",
+            "message": result["message"],
+            "stock_details": result["details"],
+        })
+
+
 class TaxeViewSet(viewsets.ModelViewSet):
     queryset = Taxe.objects.all()
     serializer_class = TaxeSerializer

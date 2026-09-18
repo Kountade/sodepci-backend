@@ -3,8 +3,10 @@
 # SERIALIZERS COMPLET - AVEC WALLET CREATE
 # ============================================================
 
+from django.db import models
+
 from produits_stocks.models import Product
-from .models import LigneVente
+from .models import LigneAvoir, LigneVente
 from rest_framework import serializers
 from django.db import transaction
 from django.db.models import Sum
@@ -894,73 +896,181 @@ class PaiementCreateSerializer(serializers.ModelSerializer):
 # ============================================================
 
 
+# ============================================================
+# LIGNE AVOIR
+# ============================================================
+# ============================================================
+# LIGNE AVOIR
+# ============================================================
+# ============================================================
+# LIGNE AVOIR
+# ============================================================
+class LigneAvoirSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_code = serializers.CharField(source="product.code", read_only=True)
+
+    class Meta:
+        model = LigneAvoir
+        fields = [
+            "id", "product", "product_name", "product_code",
+            "ligne_vente", "quantity", "unit_price",
+            "discount", "total", "notes",
+        ]
+
+
+class LigneAvoirCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LigneAvoir
+        fields = [
+            "product", "ligne_vente",
+            "quantity", "unit_price", "discount", "notes",
+        ]
+
+    def validate_quantity(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("La quantité doit être > 0")
+        return value
+
+
+# ============================================================
+# AVOIR — LECTURE
+# ============================================================
 class AvoirSerializer(serializers.ModelSerializer):
-    client_name = serializers.CharField(source='client.name', read_only=True)
+    client_name = serializers.CharField(source="client.name", read_only=True)
+    client_phone = serializers.CharField(source="client.phone", read_only=True)
     sale_number = serializers.CharField(
-        source='sale.invoice_number', read_only=True)
+        source="sale.invoice_number", read_only=True)
     type_display = serializers.CharField(
-        source='get_type_display', read_only=True)
+        source="get_type_display", read_only=True)
     created_by_name = serializers.CharField(
-        source='created_by.full_name', read_only=True)
-    amount_display = serializers.SerializerMethodField()
+        source="created_by.full_name", read_only=True
+    )
+    lignes = LigneAvoirSerializer(many=True, read_only=True)
 
     class Meta:
         model = Avoir
         fields = [
-            'id', 'avoir_number', 'sale', 'sale_number', 'client', 'client_name',
-            'type', 'type_display', 'amount', 'amount_display', 'reason', 'date',
-            'notes', 'created_by', 'created_by_name', 'created_at'
+            "id", "avoir_number", "sale", "sale_number",
+            "client", "client_name", "client_phone",
+            "type", "type_display", "amount",
+            "reason", "date", "notes",
+            "restore_stock", "stock_restored_at",
+            "lignes",
+            "created_by", "created_by_name",
+            "created_at", "updated_at",
         ]
-        read_only_fields = ['id', 'date', 'avoir_number']
+        read_only_fields = [
+            "id", "avoir_number", "date",
+            "restore_stock", "stock_restored_at",
+            "created_at", "updated_at",
+        ]
 
-    def get_amount_display(self, obj):
-        return f"{obj.amount:,.0f} FCFA" if obj.amount else "0 FCFA"
 
-
+# ============================================================
+# AVOIR — CRÉATION
+# ============================================================
 class AvoirCreateSerializer(serializers.ModelSerializer):
+    lignes = LigneAvoirCreateSerializer(many=True, required=False)
+    restore_stock = serializers.BooleanField(
+        default=False, write_only=True, required=False
+    )
+
     class Meta:
         model = Avoir
-        fields = ['sale', 'client', 'type', 'amount', 'reason', 'notes']
+        fields = [
+            "sale", "client", "type", "amount",
+            "reason", "notes", "lignes", "restore_stock",
+        ]
+        extra_kwargs = {"amount": {"required": False}}
 
-    def validate_amount(self, value):
-        if value <= 0:
+    def validate_type(self, value):
+        valid = ["refund", "return", "discount", "error"]
+        if value not in valid:
             raise serializers.ValidationError(
-                "Le montant doit être supérieur à 0")
+                f"Type invalide. Choisir parmi : {', '.join(valid)}"
+            )
         return value
 
     def validate(self, data):
-        sale = data.get('sale')
-        amount = data.get('amount', 0)
+        sale = data.get("sale")
+        lignes = data.get("lignes", [])
+        amount = data.get("amount", 0)
+        avoir_type = data.get("type")
 
-        if sale and amount > sale.total:
-            raise serializers.ValidationError(
-                {"amount": f"Le montant de l'avoir ne peut pas dépasser le total de la vente ({sale.total:,.0f} FCFA)"}
-            )
+        if sale and not lignes and amount > sale.total:
+            raise serializers.ValidationError({
+                "amount": f"Le montant ne peut pas dépasser {sale.total:,.0f} FCFA"
+            })
+
+        if sale and sale.status == "cancelled":
+            raise serializers.ValidationError({
+                "sale": "Impossible de créer un avoir sur une vente annulée"
+            })
+
+        if avoir_type == "return" and not sale:
+            raise serializers.ValidationError({
+                "sale": "Une vente est requise pour un avoir de type 'return'"
+            })
+
+        # Validation des lignes
+        if lignes and sale:
+            product_ids = [l["product"].id for l in lignes]
+            if len(product_ids) != len(set(product_ids)):
+                raise serializers.ValidationError({
+                    "lignes": "Un produit ne peut apparaître qu'une seule fois"
+                })
+
+            for l in lignes:
+                product = l["product"]
+                qty = l["quantity"]
+                vente_ligne = sale.lines.filter(product=product).first()
+
+                if not vente_ligne:
+                    raise serializers.ValidationError({
+                        "lignes": f"{product.name} n'est pas dans la vente"
+                    })
+
+                if qty > vente_ligne.quantity:
+                    raise serializers.ValidationError({
+                        "lignes": f"Quantité ({qty}) > vendue ({vente_ligne.quantity}) pour {product.name}"
+                    })
+
+                deja = (
+                    LigneAvoir.objects
+                    .filter(ligne_vente=vente_ligne)
+                    .aggregate(total=models.Sum("quantity"))["total"] or 0
+                )
+                if deja + qty > vente_ligne.quantity:
+                    raise serializers.ValidationError({
+                        "lignes": f"Retours cumulés ({deja + qty}) > vendue ({vente_ligne.quantity}) pour {product.name}"
+                    })
+
         return data
 
     @transaction.atomic
     def create(self, validated_data):
-        last_avoir = Avoir.objects.order_by('-id').first()
-        if last_avoir and last_avoir.avoir_number:
-            try:
-                num = int(last_avoir.avoir_number.split('-')[-1]) + 1
-            except (ValueError, IndexError):
-                num = 1
-        else:
-            num = 1
-        avoir_number = f"AV-{date.today().year}-{num:04d}"
+        lignes_data = validated_data.pop("lignes", [])
+        validated_data.pop("restore_stock", None)
 
-        avoir = Avoir.objects.create(
-            avoir_number=avoir_number,
-            **validated_data
-        )
+        # Calcul auto du montant
+        if lignes_data:
+            total = sum(
+                (l["quantity"] * l["unit_price"]) - l.get("discount", 0)
+                for l in lignes_data
+            )
+            validated_data["amount"] = total
+
+        avoir = Avoir.objects.create(**validated_data)
+
+        for ligne_data in lignes_data:
+            LigneAvoir.objects.create(avoir=avoir, **ligne_data)
 
         return avoir
 
+# ============================================================
+# AVOIR
+# ============================================================
 
-# ============================================================
-# TAXE
-# ============================================================
 
 class TaxeSerializer(serializers.ModelSerializer):
     rate_display = serializers.SerializerMethodField()

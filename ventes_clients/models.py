@@ -1,5 +1,8 @@
 # apps/ventes_clients/models.py
 
+import logging
+from datetime import date
+from django.db import models
 from datetime import date, timedelta
 from decimal import Decimal
 from io import BytesIO
@@ -2030,16 +2033,49 @@ class Paiement(models.Model):
 # apps/ventes_clients/models.py
 
 
+# apps/ventes_clients/models.py
+
+
+# ============================================================
+# AVOIR (NOTE DE CRÉDIT)
+# ============================================================
+
+# apps/ventes_clients/models.py
+
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# AVOIR (NOTE DE CRÉDIT)
+# ============================================================
+
+# apps/ventes_clients/models.py
+
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# AVOIR
+# ============================================================
+# ============================================================
+# AVOIR
+# ============================================================
 class Avoir(models.Model):
     """
-    Avoir client (note de crédit)
-
+    Avoir client (note de crédit).
+    
     Représente une créance de l'entreprise envers le client.
-    Un avoir peut être émis pour :
-    - Un remboursement (refund)
-    - Un retour de marchandise (return) — restaure le stock
-    - Une remise / geste commercial (discount)
-    - Une erreur de facturation (error)
+    
+    Types :
+    - refund   : Remboursement
+    - return   : Retour de marchandise (restaure le stock)
+    - discount : Remise / Geste commercial
+    - error    : Erreur de facturation
+    
+    Un avoir contient PLUSIEURS lignes (LigneAvoir) permettant
+    de gérer les retours PARTIELS (ex: 5 produits sur 10).
     """
 
     # ============================================================
@@ -2053,44 +2089,41 @@ class Avoir(models.Model):
     )
 
     # ============================================================
-    # NUMÉRO UNIQUE
+    # IDENTIFICATION
     # ============================================================
     avoir_number = models.CharField(
         max_length=50,
         unique=True,
-        verbose_name="Numéro d'avoir"
+        verbose_name="Numéro d'avoir",
     )
 
     # ============================================================
-    # VENTE ASSOCIÉE (optionnelle)
+    # RELATIONS
     # ============================================================
     sale = models.ForeignKey(
-        Vente,
-        on_delete=models.SET_NULL,   # ✅ Changé de CASCADE à SET_NULL
-        null=True,                    # ✅ Ajouté
-        blank=True,                   # ✅ Ajouté
-        related_name="avoirs",        # ✅ Renommé pour cohérence
-        verbose_name="Vente associée"
+        "Vente",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="avoirs",
+        verbose_name="Vente associée",
     )
 
-    # ============================================================
-    # CLIENT
-    # ============================================================
     client = models.ForeignKey(
-        Client,
+        "Client",
         on_delete=models.PROTECT,
-        related_name="avoirs",        # ✅ Renommé
-        verbose_name="Client"
+        related_name="avoirs",
+        verbose_name="Client",
     )
 
     # ============================================================
-    # TYPE D'AVOIR
+    # TYPE
     # ============================================================
     type = models.CharField(
         max_length=20,
         choices=TYPE_CHOICES,
         default="refund",
-        verbose_name="Type d'avoir"
+        verbose_name="Type d'avoir",
     )
 
     # ============================================================
@@ -2099,68 +2132,63 @@ class Avoir(models.Model):
     amount = models.DecimalField(
         max_digits=12,
         decimal_places=2,
-        verbose_name="Montant"
+        default=0,
+        verbose_name="Montant total",
     )
 
     # ============================================================
-    # RAISON
+    # DÉTAILS
     # ============================================================
     reason = models.TextField(
         verbose_name="Raison",
-        help_text="Motif de l'avoir (retour, remboursement, etc.)"
+        help_text="Motif de l'avoir (retour, remboursement, etc.)",
     )
 
-    # ============================================================
-    # DATE
-    # ============================================================
     date = models.DateField(
         auto_now_add=True,
-        verbose_name="Date"
+        verbose_name="Date",
     )
 
-    # ============================================================
-    # NOTES
-    # ============================================================
     notes = models.TextField(
         blank=True,
-        verbose_name="Notes internes"
+        verbose_name="Notes internes",
     )
 
     # ============================================================
-    # ✅ NOUVEAU : RESTAURATION DU STOCK
+    # RESTAURATION DU STOCK
     # ============================================================
     restore_stock = models.BooleanField(
         default=False,
         verbose_name="Stock restauré",
-        help_text="Indique si le stock a été restauré suite à cet avoir"
+        help_text="Indique si le stock a été restauré suite à cet avoir",
     )
 
     stock_restored_at = models.DateTimeField(
         null=True,
         blank=True,
-        verbose_name="Date de restauration du stock"
+        verbose_name="Date de restauration du stock",
     )
 
     # ============================================================
     # MÉTADONNÉES
     # ============================================================
     created_by = models.ForeignKey(
-        CustomUser,
+        "users.CustomUser",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name="avoirs_created",
-        verbose_name="Créé par"
+        verbose_name="Créé par",
     )
 
     created_at = models.DateTimeField(
         auto_now_add=True,
-        verbose_name="Créé le"
+        verbose_name="Créé le",
     )
 
     updated_at = models.DateTimeField(
         auto_now=True,
-        verbose_name="Modifié le"
+        verbose_name="Modifié le",
     )
 
     # ============================================================
@@ -2174,70 +2202,104 @@ class Avoir(models.Model):
             models.Index(fields=["avoir_number"]),
             models.Index(fields=["client", "-date"]),
             models.Index(fields=["type"]),
+            models.Index(fields=["sale"]),
         ]
 
     # ============================================================
-    # MÉTHODES
+    # REPRÉSENTATION
     # ============================================================
     def __str__(self):
         return (
             f"{self.avoir_number} - "
-            f"{self.client.name} - "
+            f"{self.client.name if self.client else 'N/A'} - "
             f"{self.amount:,.0f} FCFA"
         )
 
+    # ============================================================
+    # SAUVEGARDE
+    # ============================================================
     def save(self, *args, **kwargs):
-        """Génération automatique du numéro d'avoir"""
+        """Génère automatiquement le numéro d'avoir si absent."""
         if not self.avoir_number:
-            self.avoir_number = generate_number(
-                Avoir,
-                "avoir_number",
-                "AV"
-            )
+            last_avoir = Avoir.objects.order_by("-id").first()
+            if last_avoir and last_avoir.avoir_number:
+                try:
+                    num = int(last_avoir.avoir_number.split("-")[-1]) + 1
+                except (ValueError, IndexError):
+                    num = 1
+            else:
+                num = 1
+            self.avoir_number = f"AV-{date.today().year}-{num:04d}"
         super().save(*args, **kwargs)
 
-    # ------------------------------------------------------------
-    # PROPRIÉTÉS UTILITAIRES
-    # ------------------------------------------------------------
+    # ============================================================
+    # PROPRIÉTÉS
+    # ============================================================
     @property
     def type_display(self):
-        """Retourne le libellé du type (ex: 'Remboursement')"""
         return self.get_type_display()
 
     @property
     def is_refund(self):
-        """Vrai si c'est un remboursement"""
         return self.type == "refund"
 
     @property
     def is_return(self):
-        """Vrai si c'est un retour de marchandise"""
         return self.type == "return"
 
     @property
     def can_restore_stock(self):
         """
         Indique si cet avoir peut déclencher une restauration de stock.
-
+        
         Conditions :
         - Une vente doit être associée
         - Le type doit être 'refund' ou 'return'
         - Le stock ne doit pas déjà avoir été restauré
+        - Il doit y avoir au moins une ligne
         """
         return (
             self.sale is not None
             and self.type in ["refund", "return"]
             and not self.restore_stock
+            and self.lignes.exists()
         )
 
-    # ------------------------------------------------------------
-    # ACTIONS
-    # ------------------------------------------------------------
-    def restore_sale_stock(self, user=None):
-        """
-        Restaure le stock de la vente associée.
+    @property
+    def nombre_produits(self):
+        """Nombre de produits retournés"""
+        return self.lignes.count()
 
-        Retourne un dict avec le résultat :
+    @property
+    def quantite_totale(self):
+        """Quantité totale retournée"""
+        return self.lignes.aggregate(
+            total=models.Sum("quantity")
+        )["total"] or 0
+
+    # ============================================================
+    # ACTIONS
+    # ============================================================
+    def recalculate_amount(self):
+        """Recalcule le montant total à partir des lignes."""
+        total = self.lignes.aggregate(
+            total=models.Sum("total")
+        )["total"] or 0
+        self.amount = total
+        self.save(update_fields=["amount", "updated_at"])
+        return total
+
+    def restore_partial_stock(self, user=None):
+        """
+        Restaure le stock UNIQUEMENT pour les produits retournés
+        (lignes de l'avoir).
+        
+        Pour chaque ligne :
+        - Restaure la quantité dans le lot d'origine (si traçable)
+        - Met à jour le stock (recalcul depuis les lots ou ajout manuel)
+        - Crée un StockMovement avec le type 'return_in'
+        
+        Retourne un dict :
         {
             'success': bool,
             'message': str,
@@ -2246,54 +2308,256 @@ class Avoir(models.Model):
         """
         from produits_stocks.models import Stock, StockMovement
 
-        if not self.can_restore_stock:
+        # ------------------------------------------------------------
+        # VÉRIFICATIONS PRÉALABLES
+        # ------------------------------------------------------------
+        if not self.sale:
             return {
                 "success": False,
-                "message": "Restauration impossible (déjà effectuée ou type invalide)",
-                "details": []
+                "message": "Aucune vente associée à cet avoir",
+                "details": [],
             }
 
-        try:
-            # Restaurer le stock via la méthode du modèle Vente
-            self.sale.restore_stock()
+        if not self.sale.warehouse:
+            return {
+                "success": False,
+                "message": "Aucun entrepôt défini pour la vente",
+                "details": [],
+            }
 
-            # Créer les StockMovement pour la traçabilité
-            details = []
-            for line in self.sale.lines.all():
-                movement = StockMovement.objects.create(
-                    product=line.product,
-                    warehouse=self.sale.warehouse,
-                    movement_type="in",
-                    quantity=line.quantity,
-                    reference_type="sale",
-                    reference_id=self.sale.id,
-                    notes=f"Retour via avoir {self.avoir_number} - {self.reason}",
-                    created_by=user
+        if self.restore_stock:
+            return {
+                "success": False,
+                "message": "Le stock a déjà été restauré pour cet avoir",
+                "details": [],
+            }
+
+        if not self.lignes.exists():
+            return {
+                "success": False,
+                "message": "Aucune ligne dans cet avoir à restaurer",
+                "details": [],
+            }
+
+        warehouse = self.sale.warehouse
+        details = []
+
+        # ------------------------------------------------------------
+        # RESTAURATION LIGNE PAR LIGNE
+        # ------------------------------------------------------------
+        for ligne in self.lignes.select_related("product", "ligne_vente").all():
+            try:
+                # ============================================================
+                # 1. RÉCUPÉRER LE LOT D'ORIGINE (si traçable)
+                # ============================================================
+                lot_origine = None
+                if ligne.ligne_vente:
+                    lot_origine = getattr(ligne.ligne_vente, "lot", None)
+
+                quantite_retour = int(ligne.quantity)
+
+                # ============================================================
+                # 2. RESTAURER LA QUANTITÉ DANS LE LOT (si présent)
+                # ============================================================
+                ancienne_qte_lot = None
+                nouvelle_qte_lot = None
+
+                if lot_origine:
+                    ancienne_qte_lot = lot_origine.current_quantity
+                    lot_origine.current_quantity += quantite_retour
+                    lot_origine.save(update_fields=["current_quantity"])
+                    nouvelle_qte_lot = lot_origine.current_quantity
+
+                    logger.info(
+                        f"📦 Lot {lot_origine.lot_number} restauré : "
+                        f"{ancienne_qte_lot} → {nouvelle_qte_lot} "
+                        f"(+{quantite_retour})"
+                    )
+
+                # ============================================================
+                # 3. RÉCUPÉRER OU CRÉER LE STOCK
+                # ============================================================
+                stock, _ = Stock.objects.get_or_create(
+                    product=ligne.product,
+                    warehouse=warehouse,
+                    defaults={"quantity": 0, "reserved_quantity": 0},
                 )
+
+                ancienne_qte_stock = stock.quantity
+
+                # ============================================================
+                # 4. METTRE À JOUR LE STOCK
+                # ============================================================
+                if lot_origine:
+                    # Cas avec lot : recalcul depuis les lots
+                    stock.update_quantity()
+                else:
+                    # Cas sans lot : ajout manuel
+                    stock.quantity += quantite_retour
+                    stock.save(update_fields=["quantity", "last_update"])
+
+                nouvelle_qte_stock = stock.quantity
+
+                logger.info(
+                    f"📊 Stock {ligne.product.name} : "
+                    f"{ancienne_qte_stock} → {nouvelle_qte_stock} "
+                    f"(+{quantite_retour})"
+                )
+
+                # ============================================================
+                # 5. CRÉER LE STOCKMOVEMENT (avec les BONS champs)
+                # ============================================================
+                movement = StockMovement.objects.create(
+                    product=ligne.product,
+                    lot=lot_origine,                     # Lier au lot si dispo
+                    from_warehouse=None,                 # Rien ne sort
+                    to_warehouse=warehouse,              # Entrée dans cet entrepôt
+                    movement_type="return_in",           # CHOIX VALIDE
+                    quantity=quantite_retour,            # Integer
+                    previous_quantity=ancienne_qte_lot or ancienne_qte_stock,
+                    new_quantity=nouvelle_qte_lot or nouvelle_qte_stock,
+                    reference_type="avoir",              # Type de référence
+                    reference_id=self.id,                # ID de l'avoir
+                    reference_number=self.avoir_number,  # Numéro de l'avoir
+                    reason=f"Retour avoir {self.avoir_number}",
+                    notes=(
+                        f"Retour partiel via avoir {self.avoir_number} - "
+                        f"{self.reason[:200]}"
+                    ),
+                    created_by=user,
+                )
+
+                logger.info(
+                    f"✅ StockMovement #{movement.id} créé : "
+                    f"{movement.get_movement_type_display()} - "
+                    f"{ligne.product.name} +{quantite_retour}"
+                )
+
+                # ============================================================
+                # 6. AJOUTER AU DÉTAIL
+                # ============================================================
                 details.append({
-                    "product": line.product.name,
-                    "quantity": line.quantity,
-                    "movement_id": movement.id
+                    "product_id": ligne.product.id,
+                    "product_name": ligne.product.name,
+                    "product_code": getattr(ligne.product, "code", ""),
+                    "quantity": float(ligne.quantity),
+                    "lot_id": lot_origine.id if lot_origine else None,
+                    "lot_number": lot_origine.lot_number if lot_origine else None,
+                    "stock_before": ancienne_qte_stock,
+                    "stock_after": nouvelle_qte_stock,
+                    "movement_id": movement.id,
+                    "movement_type": movement.movement_type,
+                    "movement_type_display": movement.get_movement_type_display(),
                 })
 
-            # Marquer comme restauré
-            self.restore_stock = True
-            self.stock_restored_at = timezone.now()
-            self.save(update_fields=["restore_stock",
-                      "stock_restored_at", "updated_at"])
+            except Exception as e:
+                logger.exception(
+                    f"❌ Erreur restauration pour {ligne.product.name}"
+                )
+                details.append({
+                    "product_id": ligne.product.id,
+                    "product_name": ligne.product.name,
+                    "quantity": float(ligne.quantity),
+                    "error": str(e),
+                })
 
+        # ------------------------------------------------------------
+        # MARQUER L'AVOIR COMME RESTAURÉ
+        # ------------------------------------------------------------
+        self.restore_stock = True
+        self.stock_restored_at = timezone.now()
+        self.save(update_fields=["restore_stock", "stock_restored_at", "updated_at"])
+
+        # ------------------------------------------------------------
+        # RÉSULTAT FINAL
+        # ------------------------------------------------------------
+        nb_ok = len([d for d in details if "error" not in d])
+        nb_err = len([d for d in details if "error" in d])
+
+        if nb_err > 0:
             return {
                 "success": True,
-                "message": f"Stock restauré pour la vente {self.sale.invoice_number}",
-                "details": details
+                "message": (
+                    f"Stock restauré pour {nb_ok} produit(s), "
+                    f"{nb_err} erreur(s)"
+                ),
+                "details": details,
+                "errors": nb_err,
             }
 
-        except Exception as e:
-            return {
-                "success": False,
-                "message": f"Erreur lors de la restauration : {str(e)}",
-                "details": []
-            }
+        return {
+            "success": True,
+            "message": f"Stock restauré pour {nb_ok} produit(s)",
+            "details": details,
+            "errors": 0,
+        }
+# ============================================================
+# LIGNE AVOIR
+# ============================================================
+class LigneAvoir(models.Model):
+    """Produit retourné dans un avoir."""
+
+    avoir = models.ForeignKey(
+        Avoir,
+        on_delete=models.CASCADE,
+        related_name="lignes",
+    )
+
+    product = models.ForeignKey(
+        "produits_stocks.Product",
+        on_delete=models.PROTECT,
+        related_name="lignes_avoir",
+    )
+
+    ligne_vente = models.ForeignKey(
+        "ventes_clients.LigneVente",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="lignes_avoir",
+    )
+
+    quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        verbose_name="Quantité retournée",
+    )
+
+    unit_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        verbose_name="Prix unitaire",
+    )
+
+    discount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name="Remise",
+    )
+
+    total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name="Total ligne",
+    )
+
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Ligne d'avoir"
+        verbose_name_plural = "Lignes d'avoir"
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.product.name} x {self.quantity:g} - {self.total:,.0f} FCFA"
+
+    def save(self, *args, **kwargs):
+        self.total = (self.quantity * self.unit_price) - (self.discount or 0)
+        super().save(*args, **kwargs)
+
 
 # ============================================================
 # TAXE
