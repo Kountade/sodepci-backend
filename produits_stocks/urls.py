@@ -4,7 +4,8 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     CategoryViewSet, UnitMeasureViewSet, ProductViewSet, WarehouseViewSet,
     LotViewSet, StockViewSet, StockMovementViewSet, ExpiryAlertViewSet,
-    InventoryViewSet, DashboardStatsViewSet, TransferViewSet
+    InventoryViewSet, DashboardStatsViewSet, TransferViewSet,
+    InventoryLineViewSet,  # ✅ AJOUT
 )
 
 router = DefaultRouter()
@@ -17,9 +18,9 @@ router.register('stocks', StockViewSet, basename='stocks')
 router.register('movements', StockMovementViewSet, basename='movements')
 router.register('expiry-alerts', ExpiryAlertViewSet, basename='expiry-alerts')
 router.register('inventories', InventoryViewSet, basename='inventories')
+router.register('inventory-lines', InventoryLineViewSet, basename='inventory-lines')  # ✅ AJOUT
 router.register('transfers', TransferViewSet, basename='transfers')
-router.register('dashboard-stats', DashboardStatsViewSet,
-                basename='dashboard-stats')
+router.register('dashboard-stats', DashboardStatsViewSet, basename='dashboard-stats')
 
 urlpatterns = [
     path('', include(router.urls)),

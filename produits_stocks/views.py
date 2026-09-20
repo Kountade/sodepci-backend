@@ -591,6 +591,89 @@ class ExpiryAlertViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({"message": "Alerte marquée comme traitée"})
 
 
+# apps/produits_stocks/views.py — À AJOUTER à la fin
+
+from rest_framework import viewsets, permissions, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django.db import transaction
+
+
+class InventoryLineViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour les lignes d'inventaire (saisie des quantités réelles)
+    """
+    queryset = InventoryLine.objects.all()
+    serializer_class = InventoryLineSerializer
+    permission_classes = [permissions.IsAuthenticated, IsGestionnaire]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        inventory_id = self.request.query_params.get('inventory')
+        if inventory_id:
+            queryset = queryset.filter(inventory_id=inventory_id)
+        return queryset
+
+    def get_serializer_class(self):
+        if self.action in ['update', 'partial_update']:
+            return InventoryLineUpdateSerializer
+        return InventoryLineSerializer
+
+    def partial_update(self, request, *args, **kwargs):
+        """Mise à jour partielle (saisie quantité réelle)"""
+        instance = self.get_object()
+        serializer = InventoryLineUpdateSerializer(
+            instance, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        # Recalcul des totaux de l'inventaire parent
+        inventory = instance.inventory
+        inventory.total_expected_value = inventory.lines.aggregate(
+            total=models.Sum('expected_value')
+        )['total'] or 0
+        inventory.total_actual_value = inventory.lines.aggregate(
+            total=models.Sum('actual_value')
+        )['total'] or 0
+        inventory.total_difference = (
+            inventory.total_actual_value - inventory.total_expected_value
+        )
+        inventory.save(update_fields=[
+            'total_expected_value', 'total_actual_value', 'total_difference'
+        ])
+
+        return Response(InventoryLineSerializer(instance).data)
+
+    @action(detail=True, methods=['post'], url_path='apply-adjustment')
+    def apply_adjustment(self, request, pk=None):
+        """Applique l'ajustement de stock pour cette ligne"""
+        line = self.get_object()
+        if line.is_verified:
+            return Response(
+                {"error": "Cette ligne a déjà été ajustée"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if line.actual_quantity is None:
+            return Response(
+                {"error": "Veuillez saisir la quantité réelle avant d'ajuster"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            with transaction.atomic():
+                line.apply_adjustment(request.user)
+            return Response({
+                "status": "success",
+                "message": f"Ajustement appliqué pour {line.product.name}",
+                "difference": line.difference,
+            })
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 # ==================== INVENTORY VIEWSET ====================
 class InventoryViewSet(viewsets.ModelViewSet):
     queryset = Inventory.objects.all()
