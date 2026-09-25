@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     "dashboard",
     "knox",
     "corsheaders",
+    "django_filters",
     "django_rest_passwordreset",
 ]
 

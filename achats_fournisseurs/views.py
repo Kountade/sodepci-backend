@@ -326,6 +326,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 # ============================================================
 
 
+# ============================================================
+# RÉCEPTION VIEWSET
+# ============================================================
+
 class ReceiptViewSet(viewsets.ModelViewSet):
     queryset = Receipt.objects.all()
     permission_classes = [permissions.IsAuthenticated, IsMagasinier]
@@ -345,56 +349,107 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().select_related(
+            'purchase_order',
+            'purchase_order__supplier',
+            'warehouse',
+            'created_by'
+        ).prefetch_related('lines', 'lines__product')
+
+        # Filtre par commande
         purchase_order = self.request.query_params.get('purchase_order')
         if purchase_order:
             queryset = queryset.filter(purchase_order_id=purchase_order)
+
+        # Filtre par statut
         status_filter = self.request.query_params.get('status')
         if status_filter:
             queryset = queryset.filter(status=status_filter)
+
+        # ✅ NOUVEAU : Filtre par is_invoiced
+        is_invoiced = self.request.query_params.get('is_invoiced')
+        if is_invoiced is not None:
+            if is_invoiced.lower() == 'true':
+                queryset = queryset.filter(is_invoiced=True)
+            elif is_invoiced.lower() == 'false':
+                queryset = queryset.filter(is_invoiced=False)
+
+        # Filtre par entrepôt
         warehouse = self.request.query_params.get('warehouse')
         if warehouse:
             queryset = queryset.filter(warehouse_id=warehouse)
+
+        # Filtre par fournisseur
+        supplier = self.request.query_params.get('supplier')
+        if supplier:
+            queryset = queryset.filter(purchase_order__supplier_id=supplier)
+
+        # Filtre par date
         date_from = self.request.query_params.get('date_from')
         if date_from:
             queryset = queryset.filter(receipt_date__date__gte=date_from)
+
         date_to = self.request.query_params.get('date_to')
         if date_to:
             queryset = queryset.filter(receipt_date__date__lte=date_to)
+
+        # Recherche
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(receipt_number__icontains=search) |
+                Q(purchase_order__po_number__icontains=search) |
+                Q(purchase_order__supplier__name__icontains=search)
+            )
+
+        # Tri
         ordering = self.request.query_params.get('ordering', '-receipt_date')
         if ordering:
             queryset = queryset.order_by(ordering)
+
         return queryset
 
+    # ✅ CORRECTION CRITIQUE : Retirer created_by
+    # Le serializer ReceiptCreateSerializer le passe déjà lui-même
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save()
 
     @action(detail=False, methods=['get'])
     def available_for_invoice(self, request):
+        """Récupère les réceptions disponibles pour facturation"""
         purchase_order_id = request.query_params.get('purchase_order')
         supplier_id = request.query_params.get('supplier')
+
         queryset = Receipt.objects.filter(
-            status='completed', is_invoiced=False)
+            status='completed',
+            is_invoiced=False
+        ).select_related('purchase_order', 'purchase_order__supplier')
+
         if purchase_order_id:
             queryset = queryset.filter(purchase_order_id=purchase_order_id)
         if supplier_id:
             queryset = queryset.filter(purchase_order__supplier_id=supplier_id)
+
         queryset = queryset.order_by('-receipt_date')
         serializer = ReceiptChoiceSerializer(queryset, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
+        """Annuler une réception"""
         receipt = self.get_object()
+
         if receipt.status != 'in_progress':
             return Response(
                 {"error": "Cette réception ne peut pas être annulée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
         receipt.status = 'cancelled'
         receipt.save()
         receipt.generate_qr_code()
         receipt.save()
+
         return Response({
             'status': receipt.status,
             'message': 'Réception annulée avec succès'
@@ -402,16 +457,20 @@ class ReceiptViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
+        """Terminer une réception"""
         receipt = self.get_object()
+
         if receipt.status != 'in_progress':
             return Response(
                 {"error": "Seules les réceptions en cours peuvent être terminées"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
         receipt.status = 'completed'
         receipt.save()
         receipt.generate_qr_code()
         receipt.save()
+
         return Response({
             'status': receipt.status,
             'message': 'Réception terminée avec succès'
@@ -419,24 +478,42 @@ class ReceiptViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def generate_qr(self, request, pk=None):
+        """Générer le QR Code d'une réception"""
         receipt = self.get_object()
+
         if not receipt.qr_code:
             receipt.generate_qr_code()
             receipt.save()
+
         if receipt.qr_code:
             return Response({
                 'qr_code_url': request.build_absolute_uri(receipt.qr_code.url),
                 'qr_code_data': receipt.qr_code_data
             })
+
         return Response(
             {"error": "Impossible de générer le QR Code"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+    @action(detail=True, methods=['get'])
+    def pdf_data(self, request, pk=None):
+        """
+        ✅ Endpoint dédié pour récupérer les données du PDF
+        Utile pour la génération côté client
+        """
+        receipt = self.get_object()
+        serializer = ReceiptDetailSerializer(
+            receipt, context={'request': request}
+        )
+        return Response(serializer.data)
 
 # ============================================================
 # RETOUR FOURNISSEUR VIEWSET
 # ============================================================
+
+# apps/achats_fournisseurs/views.py
+
 
 class PurchaseReturnViewSet(viewsets.ModelViewSet):
     queryset = PurchaseReturn.objects.all()
@@ -453,34 +530,173 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().select_related(
+            'purchase_order', 'purchase_order__supplier', 'receipt', 'created_by'
+        ).prefetch_related('lines', 'lines__product')
+
         purchase_order = self.request.query_params.get('purchase_order')
         if purchase_order:
             queryset = queryset.filter(purchase_order_id=purchase_order)
+
+        supplier = self.request.query_params.get('supplier')
+        if supplier:
+            queryset = queryset.filter(purchase_order__supplier_id=supplier)
+
         status_filter = self.request.query_params.get('status')
         if status_filter:
             queryset = queryset.filter(status=status_filter)
+
         reason = self.request.query_params.get('reason')
         if reason:
             queryset = queryset.filter(reason=reason)
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(return_number__icontains=search) |
+                Q(purchase_order__po_number__icontains=search) |
+                Q(purchase_order__supplier__name__icontains=search)
+            )
+
         date_from = self.request.query_params.get('date_from')
         if date_from:
             queryset = queryset.filter(return_date__date__gte=date_from)
+
         date_to = self.request.query_params.get('date_to')
         if date_to:
             queryset = queryset.filter(return_date__date__lte=date_to)
+
         ordering = self.request.query_params.get('ordering', '-return_date')
         if ordering:
             queryset = queryset.order_by(ordering)
+
         return queryset
 
+    # ✅ CORRECTION : NE PAS passer created_by (déjà fait dans le serializer)
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save()
 
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """Passer le retour en 'approved'"""
+        retour = self.get_object()
+        if retour.status != 'requested':
+            return Response(
+                {"error": f"Impossible d'approuver un retour au statut '{retour.get_status_display()}'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        retour.status = 'approved'
+        if request.data.get('notes'):
+            retour.notes = (retour.notes + "\n" +
+                            request.data['notes']).strip()
+        retour.save()
+        retour.generate_qr_code()
+        retour.save()
+        return Response({
+            'status': retour.status,
+            'status_display': retour.get_status_display(),
+            'message': '✅ Retour approuvé'
+        })
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Refuser le retour"""
+        retour = self.get_object()
+        if retour.status not in ['requested', 'approved']:
+            return Response(
+                {"error": f"Impossible de refuser un retour au statut '{retour.get_status_display()}'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        retour.status = 'rejected'
+        if request.data.get('notes'):
+            retour.notes = (retour.notes + "\n" +
+                            request.data['notes']).strip()
+        retour.save()
+        retour.generate_qr_code()
+        retour.save()
+        return Response({
+            'status': retour.status,
+            'status_display': retour.get_status_display(),
+            'message': '❌ Retour refusé'
+        })
+
+    @action(detail=True, methods=['post'])
+    def ship(self, request, pk=None):
+        """Marquer le retour comme expédié"""
+        retour = self.get_object()
+        if retour.status != 'approved':
+            return Response(
+                {"error": f"Le retour doit être 'Approuvé'. Statut actuel : {retour.get_status_display()}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        retour.status = 'shipped'
+        retour.save()
+        retour.generate_qr_code()
+        retour.save()
+        return Response({
+            'status': retour.status,
+            'status_display': retour.get_status_display(),
+            'message': '🚚 Retour expédié'
+        })
+
+    @action(detail=True, methods=['post'])
+    def refund(self, request, pk=None):
+        """Marquer le retour comme remboursé"""
+        retour = self.get_object()
+        if retour.status != 'shipped':
+            return Response(
+                {"error": f"Le retour doit être 'Expédié'. Statut actuel : {retour.get_status_display()}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        retour.status = 'refunded'
+        retour.save()
+        retour.generate_qr_code()
+        retour.save()
+        return Response({
+            'status': retour.status,
+            'status_display': retour.get_status_display(),
+            'message': '💰 Retour remboursé'
+        })
+
+    @action(detail=True, methods=['post'])
+    def replace(self, request, pk=None):
+        """Marquer le retour comme remplacé"""
+        retour = self.get_object()
+        if retour.status != 'shipped':
+            return Response(
+                {"error": f"Le retour doit être 'Expédié'. Statut actuel : {retour.get_status_display()}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        retour.status = 'replaced'
+        retour.save()
+        retour.generate_qr_code()
+        retour.save()
+        return Response({
+            'status': retour.status,
+            'status_display': retour.get_status_display(),
+            'message': '🔄 Retour remplacé'
+        })
+
+    @action(detail=True, methods=['get'])
+    def generate_qr(self, request, pk=None):
+        retour = self.get_object()
+        if not retour.qr_code:
+            retour.generate_qr_code()
+            retour.save()
+        if retour.qr_code:
+            return Response({
+                'qr_code_url': request.build_absolute_uri(retour.qr_code.url),
+                'qr_code_data': retour.qr_code_data
+            })
+        return Response(
+            {"error": "Impossible de générer le QR Code"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 # ============================================================
 # FACTURE FOURNISSEUR VIEWSET - CORRIGÉ
 # ============================================================
+
 
 class SupplierInvoiceViewSet(viewsets.ModelViewSet):
     queryset = SupplierInvoice.objects.all()
