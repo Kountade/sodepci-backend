@@ -8,6 +8,7 @@ class DashboardSummarySerializer(serializers.Serializer):
     purchases = serializers.DictField()
     cash = serializers.DictField()
     alerts = serializers.DictField()
+    receivables = serializers.DictField()
     recent_activities = serializers.ListField()
 
 

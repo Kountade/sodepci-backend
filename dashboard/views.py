@@ -84,6 +84,54 @@ class DashboardViewSet(viewsets.ViewSet):
                 status__in=['sent', 'partial']
             ).count()
 
+            # ============================================================
+            # ✅ NOUVEAU : CRÉANCES CLIENTS (MONTANTS NON PAYÉS)
+            # ============================================================
+            # On récupère toutes les factures non soldées
+            factures_impayees = Facture.objects.filter(
+                status__in=['sent', 'partial', 'overdue']
+            ).exclude(status='paid').select_related('client')
+
+            total_receivables = 0
+            receivables_by_client = {}
+
+            for facture in factures_impayees:
+                # remaining_amount est une @property : total - amount_paid
+                remaining = facture.remaining_amount
+                if remaining > 0:
+                    total_receivables += remaining
+                    client_name = (
+                        facture.client.name
+                        if facture.client
+                        else "Client inconnu"
+                    )
+                    if client_name not in receivables_by_client:
+                        receivables_by_client[client_name] = {
+                            'client_id': facture.client.id if facture.client else None,
+                            'client_name': client_name,
+                            'total_due': 0,
+                            'invoices_count': 0,
+                        }
+                    receivables_by_client[client_name]['total_due'] += remaining
+                    receivables_by_client[client_name]['invoices_count'] += 1
+
+            # Nombre de factures réellement impayées (remaining > 0)
+            unpaid_invoices_count = len(receivables_by_client) and sum(
+                c['invoices_count'] for c in receivables_by_client.values()
+            ) or 0
+
+            # Factures en retard (parmi les impayées)
+            overdue_count = factures_impayees.filter(
+                due_date__lt=today
+            ).count()
+
+            # Top 5 des clients les plus endettés
+            top_debtors = sorted(
+                receivables_by_client.values(),
+                key=lambda x: x['total_due'],
+                reverse=True
+            )[:5]
+
             # --- Activités récentes ---
             recent_activities = []
 
@@ -130,6 +178,9 @@ class DashboardViewSet(viewsets.ViewSet):
             recent_activities.sort(key=lambda x: x['date'], reverse=True)
             recent_activities = recent_activities[:10]
 
+            # ============================================================
+            # RÉPONSE
+            # ============================================================
             data = {
                 'products': {
                     'total': total_products,
@@ -156,6 +207,21 @@ class DashboardViewSet(viewsets.ViewSet):
                     'low_stock': low_stock_alerts,
                     'expiring_lots': expiring_lots,
                     'overdue_invoices': overdue_invoices,
+                },
+                # ✅ NOUVEAU BLOC
+                'receivables': {
+                    'total': float(total_receivables),
+                    'invoices_count': unpaid_invoices_count,
+                    'overdue_count': overdue_count,
+                    'top_debtors': [
+                        {
+                            'client_id': d['client_id'],
+                            'client_name': d['client_name'],
+                            'total_due': float(d['total_due']),
+                            'invoices_count': d['invoices_count'],
+                        }
+                        for d in top_debtors
+                    ],
                 },
                 'recent_activities': recent_activities,
             }
