@@ -13,6 +13,7 @@ urlpatterns = [
     path('', include('finances.urls')),
     path('', include('tresorerie.urls')),
     path('', include('dashboard.urls')),
+    path('', include('station_services.urls')),
     path('', include('config.urls')),
 
 

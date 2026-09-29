@@ -7,8 +7,9 @@ from .models import (
     VenteCarburant, Service, VenteService,
     PrixCarburant, StatistiquesStation
 )
-from users.serializers import CustomUserSerializer
-from produits_stocks.serializers import ProductSerializer, WarehouseSerializer
+
+from users.serializers import UserSerializer as CustomUserSerializer
+from produits_stocks.serializers import WarehouseSerializer
 from ventes_clients.serializers import ClientSerializer, FactureSerializer
 
 
@@ -24,7 +25,8 @@ class CuveSerializer(serializers.ModelSerializer):
     est_en_alerte = serializers.BooleanField(read_only=True)
     niveau_display = serializers.CharField(read_only=True)
     warehouse_details = WarehouseSerializer(source='warehouse', read_only=True)
-    created_by_details = CustomUserSerializer(source='created_by', read_only=True)
+    created_by_details = CustomUserSerializer(
+        source='created_by', read_only=True)
 
     class Meta:
         model = Cuve
@@ -42,8 +44,10 @@ class CuveSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        capacite_max = attrs.get('capacite_max', getattr(self.instance, 'capacite_max', 0))
-        capacite_alerte = attrs.get('capacite_alerte', getattr(self.instance, 'capacite_alerte', 0))
+        capacite_max = attrs.get('capacite_max', getattr(
+            self.instance, 'capacite_max', 0))
+        capacite_alerte = attrs.get('capacite_alerte', getattr(
+            self.instance, 'capacite_alerte', 0))
         if capacite_alerte and capacite_max and capacite_alerte >= capacite_max:
             raise serializers.ValidationError(
                 "Le seuil d'alerte doit être inférieur à la capacité maximale."
@@ -69,25 +73,31 @@ class CuveListSerializer(serializers.ModelSerializer):
 
 class ApprovisionnementCuveSerializer(serializers.Serializer):
     """Serializer pour ajouter du stock à une cuve"""
-    quantite = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
-    reference = serializers.CharField(required=False, allow_blank=True, default='')
+    quantite = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    reference = serializers.CharField(
+        required=False, allow_blank=True, default='')
     notes = serializers.CharField(required=False, allow_blank=True, default='')
 
     def validate_quantite(self, value):
         if value <= 0:
-            raise serializers.ValidationError("La quantité doit être supérieure à zéro.")
+            raise serializers.ValidationError(
+                "La quantité doit être supérieure à zéro.")
         return value
 
 
 class RetraitCuveSerializer(serializers.Serializer):
     """Serializer pour retirer du stock d'une cuve"""
-    quantite = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
-    reference = serializers.CharField(required=False, allow_blank=True, default='')
+    quantite = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    reference = serializers.CharField(
+        required=False, allow_blank=True, default='')
     notes = serializers.CharField(required=False, allow_blank=True, default='')
 
     def validate_quantite(self, value):
         if value <= 0:
-            raise serializers.ValidationError("La quantité doit être supérieure à zéro.")
+            raise serializers.ValidationError(
+                "La quantité doit être supérieure à zéro.")
         return value
 
 
@@ -100,7 +110,8 @@ class MouvementCuveSerializer(serializers.ModelSerializer):
         source='get_type_mouvement_display', read_only=True
     )
     cuve_details = CuveListSerializer(source='cuve', read_only=True)
-    created_by_details = CustomUserSerializer(source='created_by', read_only=True)
+    created_by_details = CustomUserSerializer(
+        source='created_by', read_only=True)
 
     class Meta:
         model = MouvementCuve
@@ -117,11 +128,14 @@ class MouvementCuveSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class PompeSerializer(serializers.ModelSerializer):
-    statut_display = serializers.CharField(source='get_statut_display', read_only=True)
-    total_vendu = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
+    statut_display = serializers.CharField(
+        source='get_statut_display', read_only=True)
+    total_vendu = serializers.DecimalField(
+        max_digits=15, decimal_places=2, read_only=True)
     est_disponible = serializers.BooleanField(read_only=True)
     cuve_details = CuveListSerializer(source='cuve', read_only=True)
-    created_by_details = CustomUserSerializer(source='created_by', read_only=True)
+    created_by_details = CustomUserSerializer(
+        source='created_by', read_only=True)
 
     class Meta:
         model = Pompe
@@ -139,7 +153,8 @@ class PompeSerializer(serializers.ModelSerializer):
 
 
 class PompeListSerializer(serializers.ModelSerializer):
-    statut_display = serializers.CharField(source='get_statut_display', read_only=True)
+    statut_display = serializers.CharField(
+        source='get_statut_display', read_only=True)
     est_disponible = serializers.BooleanField(read_only=True)
 
     class Meta:
@@ -152,9 +167,12 @@ class PompeListSerializer(serializers.ModelSerializer):
 
 class VentePompeSerializer(serializers.Serializer):
     """Serializer pour enregistrer une vente sur une pompe"""
-    quantite = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
-    montant = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.00'))
-    reference = serializers.CharField(required=False, allow_blank=True, default='')
+    quantite = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    montant = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.00'))
+    reference = serializers.CharField(
+        required=False, allow_blank=True, default='')
     notes = serializers.CharField(required=False, allow_blank=True, default='')
 
 
@@ -167,7 +185,8 @@ class MouvementPompeSerializer(serializers.ModelSerializer):
         source='get_type_mouvement_display', read_only=True
     )
     pompe_details = PompeListSerializer(source='pompe', read_only=True)
-    created_by_details = CustomUserSerializer(source='created_by', read_only=True)
+    created_by_details = CustomUserSerializer(
+        source='created_by', read_only=True)
 
     class Meta:
         model = MouvementPompe
@@ -184,12 +203,15 @@ class MouvementPompeSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class VenteCarburantSerializer(serializers.ModelSerializer):
-    type_vente_display = serializers.CharField(source='get_type_vente_display', read_only=True)
-    type_paiement_display = serializers.CharField(source='get_type_paiement_display', read_only=True)
+    type_vente_display = serializers.CharField(
+        source='get_type_vente_display', read_only=True)
+    type_paiement_display = serializers.CharField(
+        source='get_type_paiement_display', read_only=True)
     pompe_details = PompeListSerializer(source='pompe', read_only=True)
     client_details = ClientSerializer(source='client', read_only=True)
     facture_details = FactureSerializer(source='facture', read_only=True)
-    created_by_details = CustomUserSerializer(source='created_by', read_only=True)
+    created_by_details = CustomUserSerializer(
+        source='created_by', read_only=True)
 
     class Meta:
         model = VenteCarburant
@@ -232,7 +254,8 @@ class VenteCarburantSerializer(serializers.ModelSerializer):
                 validated_data['quantite'] * validated_data['prix_unitaire']
             )
         validated_data['montant_net'] = (
-            validated_data['montant'] - validated_data.get('remise', Decimal('0'))
+            validated_data['montant'] -
+            validated_data.get('remise', Decimal('0'))
         )
 
         # Enregistrer la vente sur la pompe
@@ -250,7 +273,8 @@ class VenteCarburantSerializer(serializers.ModelSerializer):
 
 
 class VenteCarburantListSerializer(serializers.ModelSerializer):
-    type_paiement_display = serializers.CharField(source='get_type_paiement_display', read_only=True)
+    type_paiement_display = serializers.CharField(
+        source='get_type_paiement_display', read_only=True)
 
     class Meta:
         model = VenteCarburant
@@ -269,7 +293,8 @@ class ServiceSerializer(serializers.ModelSerializer):
     type_service_display = serializers.CharField(
         source='get_type_service_display', read_only=True
     )
-    created_by_details = CustomUserSerializer(source='created_by', read_only=True)
+    created_by_details = CustomUserSerializer(
+        source='created_by', read_only=True)
 
     class Meta:
         model = Service
@@ -303,7 +328,8 @@ class VenteServiceSerializer(serializers.ModelSerializer):
     service_details = ServiceListSerializer(source='service', read_only=True)
     client_details = ClientSerializer(source='client', read_only=True)
     facture_details = FactureSerializer(source='facture', read_only=True)
-    created_by_details = CustomUserSerializer(source='created_by', read_only=True)
+    created_by_details = CustomUserSerializer(
+        source='created_by', read_only=True)
 
     class Meta:
         model = VenteService
@@ -345,10 +371,12 @@ class VenteServiceSerializer(serializers.ModelSerializer):
 
         if not validated_data.get('montant'):
             validated_data['montant'] = (
-                validated_data['prix_unitaire'] * validated_data.get('quantite', 1)
+                validated_data['prix_unitaire'] *
+                validated_data.get('quantite', 1)
             )
         validated_data['montant_net'] = (
-            validated_data['montant'] - validated_data.get('remise', Decimal('0'))
+            validated_data['montant'] -
+            validated_data.get('remise', Decimal('0'))
         )
         return super().create(validated_data)
 
@@ -359,7 +387,8 @@ class VenteServiceSerializer(serializers.ModelSerializer):
 
 class PrixCarburantSerializer(serializers.ModelSerializer):
     cuve_details = CuveListSerializer(source='cuve', read_only=True)
-    created_by_details = CustomUserSerializer(source='created_by', read_only=True)
+    created_by_details = CustomUserSerializer(
+        source='created_by', read_only=True)
 
     class Meta:
         model = PrixCarburant

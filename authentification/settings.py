@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "produits_stocks",
     "rest_framework",
     "ventes_clients",
+    "station_services",
     "config",
     "dashboard",
     "knox",
