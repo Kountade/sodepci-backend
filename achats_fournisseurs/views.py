@@ -965,6 +965,10 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
 # DASHBOARD STATS VIEWSET
 # ============================================================
 
+# ============================================================
+# DASHBOARD STATS VIEWSET
+# ============================================================
+
 class AchatsDashboardStatsViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -972,6 +976,7 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
     def statistics(self, request):
         today = date.today()
 
+        # ========== COMMANDES ==========
         total_orders = PurchaseOrder.objects.count()
         pending_orders = PurchaseOrder.objects.filter(
             status__in=['draft', 'sent', 'confirmed']
@@ -981,57 +986,73 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
             order_date__year=today.year
         ).count()
 
-        total_amount = PurchaseOrder.objects.aggregate(total=Sum('total'))[
-            'total'] or 0
+        total_amount = PurchaseOrder.objects.aggregate(
+            total=Sum('total')
+        )['total'] or 0
+
         amount_this_month = PurchaseOrder.objects.filter(
             order_date__month=today.month,
             order_date__year=today.year
         ).aggregate(total=Sum('total'))['total'] or 0
 
+        # ========== RÉCEPTIONS ==========
         total_received = Receipt.objects.filter(status='completed').count()
         pending_receipts = Receipt.objects.filter(
-            status__in=['pending', 'in_progress']).count()
+            status__in=['pending', 'in_progress']
+        ).count()
         non_invoiced_receipts = Receipt.objects.filter(
-            is_invoiced=False, status='completed').count()
+            is_invoiced=False, status='completed'
+        ).count()
 
         received_amount = PurchaseOrder.objects.aggregate(
-            total=Sum('total_received_amount'))['total'] or 0
+            total=Sum('total_received_amount')
+        )['total'] or 0
         remaining_to_receive = total_amount - received_amount
 
+        # ========== FACTURES ==========
         total_invoices = SupplierInvoice.objects.count()
         unpaid_invoices = SupplierInvoice.objects.filter(
-            paiement_status__in=['unpaid', 'partial', 'overdue']).count()
+            paiement_status__in=['unpaid', 'partial', 'overdue']
+        ).count()
         overdue_invoices = SupplierInvoice.objects.filter(
             due_date__lt=today,
             paiement_status__in=['unpaid', 'partial']
         ).count()
 
         total_invoiced = SupplierInvoice.objects.aggregate(
-            total=Sum('total_amount'))['total'] or 0
+            total=Sum('total_amount')
+        )['total'] or 0
         total_paid = SupplierInvoice.objects.aggregate(
-            total=Sum('amount_paid'))['total'] or 0
+            total=Sum('amount_paid')
+        )['total'] or 0
         total_remaining_to_pay = total_invoiced - total_paid
 
+        # ========== TOP FOURNISSEURS ==========
+        # ✅ CORRECTION : Renommer les annotations pour éviter le conflit avec le champ `total_orders`
         top_suppliers = Supplier.objects.annotate(
-            total_orders=Count('purchase_orders'),
-            total_amount=Sum('purchase_orders__total')
-        ).order_by('-total_amount')[:5]
+            # ← renommé (était total_orders)
+            orders_count=Count('purchase_orders'),
+            # ← renommé (était total_amount)
+            orders_total_amount=Sum('purchase_orders__total')
+        ).filter(orders_count__gt=0).order_by('-orders_total_amount')[:5]
 
         top_suppliers_data = []
         for supplier in top_suppliers:
             top_suppliers_data.append({
                 'id': supplier.id,
                 'name': supplier.name,
-                'total_orders': supplier.total_orders,
-                'total_amount': supplier.total_amount or 0
+                'total_orders': supplier.orders_count,
+                'total_amount': supplier.orders_total_amount or 0
             })
 
+        # ========== COMMANDES PAR STATUT ==========
         orders_by_status = {}
         for status_code, status_label in PurchaseOrder.STATUS_CHOICES:
             count = PurchaseOrder.objects.filter(status=status_code).count()
             if count > 0:
                 orders_by_status[status_code] = count
 
+        # ========== ALERTES ==========
         alerts = {
             'overdue_invoices': overdue_invoices,
             'pending_receipts': pending_receipts,
@@ -1039,6 +1060,7 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
             'non_invoiced_receipts': non_invoiced_receipts,
         }
 
+        # ========== RÉPONSE ==========
         return Response({
             'orders': {
                 'total': total_orders,

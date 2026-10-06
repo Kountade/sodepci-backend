@@ -1,4 +1,6 @@
 import django_filters
+from django.db.models import F   # ✅ Ajouté
+
 from .models import (
     Cuve, Pompe, VenteCarburant, VenteService,
     MouvementCuve, MouvementPompe
@@ -16,7 +18,8 @@ class CuveFilter(django_filters.FilterSet):
 
     def filter_en_alerte(self, queryset, name, value):
         if value:
-            return queryset.filter(niveau_actuel__lte=django_filters.models.F('capacite_alerte'))
+            # ✅
+            return queryset.filter(niveau_actuel__lte=F('capacite_alerte'))
         return queryset
 
 

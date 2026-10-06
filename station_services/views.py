@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum, Count, Q, F   # ✅ F ajouté
 from django.utils import timezone
 from datetime import date, timedelta
 from decimal import Decimal
@@ -118,7 +118,8 @@ class CuveViewSet(viewsets.ModelViewSet):
     def alertes(self, request):
         """Cuves en alerte"""
         cuves = self.get_queryset().filter(
-            niveau_actuel__lte=models.F('capacite_alerte'),
+            # ✅ F() au lieu de models.F()
+            niveau_actuel__lte=F('capacite_alerte'),
             est_active=True
         )
         serializer = CuveListSerializer(cuves, many=True)
@@ -426,27 +427,41 @@ class StatistiquesStationViewSet(viewsets.ModelViewSet):
         debut_mois = today.replace(day=1)
 
         # Ventes carburant du jour
-        ventes_carb_jour = VenteCarburant.objects.filter(date_vente__date=today).aggregate(
-            total=Sum('montant_net'), litres=Sum('quantite'), nb=Count('id')
+        ventes_carb_jour = VenteCarburant.objects.filter(
+            date_vente__date=today
+        ).aggregate(
+            total=Sum('montant_net'),
+            litres=Sum('quantite'),
+            nb=Count('id')
         )
+
         # Ventes services du jour
-        ventes_serv_jour = VenteService.objects.filter(date_vente__date=today).aggregate(
-            total=Sum('montant_net'), nb=Count('id')
+        ventes_serv_jour = VenteService.objects.filter(
+            date_vente__date=today
+        ).aggregate(
+            total=Sum('montant_net'),
+            nb=Count('id')
         )
+
         # Ventes carburant du mois
         ventes_carb_mois = VenteCarburant.objects.filter(
             date_vente__date__gte=debut_mois
-        ).aggregate(total=Sum('montant_net'), litres=Sum('quantite'))
+        ).aggregate(
+            total=Sum('montant_net'),
+            litres=Sum('quantite')
+        )
 
         # Cuves en alerte
         cuves_alerte = Cuve.objects.filter(
-            niveau_actuel__lte=models.F('capacite_alerte'),
+            # ✅ F() au lieu de models.F()
+            niveau_actuel__lte=F('capacite_alerte'),
             est_active=True
         ).count()
 
         # Pompes disponibles
         pompes_dispo = Pompe.objects.filter(
-            statut='active', is_active=True).count()
+            statut='active', is_active=True
+        ).count()
 
         return Response({
             'date': today,
@@ -455,5 +470,8 @@ class StatistiquesStationViewSet(viewsets.ModelViewSet):
             'ventes_carburant_mois': ventes_carb_mois,
             'cuves_en_alerte': cuves_alerte,
             'pompes_disponibles': pompes_dispo,
-            'ca_jour': (ventes_carb_jour['total'] or 0) + (ventes_serv_jour['total'] or 0),
+            'ca_jour': (
+                (ventes_carb_jour['total'] or 0) +
+                (ventes_serv_jour['total'] or 0)
+            ),
         })
