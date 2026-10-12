@@ -1,18 +1,19 @@
-from django.db import models
-
-# Create your models here.
 # apps/produits_stocks/models.py
+# ============================================================
+# MODELS OPTIMISÉS - Index ajoutés pour performances
+# ============================================================
+
 from django.db import models
 from django.utils import timezone
 from datetime import date, timedelta
 from decimal import Decimal
 
-from django.utils import timezone
-from datetime import date, timedelta
-
 from users.models import CustomUser
 
 
+# ============================================================
+# CATEGORY
+# ============================================================
 class Category(models.Model):
     """
     Catégorie de produits pour organisation hiérarchique
@@ -47,6 +48,13 @@ class Category(models.Model):
         verbose_name = "Catégorie"
         verbose_name_plural = "Catégories"
         ordering = ['name']
+        indexes = [
+            models.Index(fields=['code'], name='category_code_idx'),
+            models.Index(fields=['name'], name='category_name_idx'),
+            models.Index(fields=['is_active'], name='category_active_idx'),
+            models.Index(fields=['parent'], name='category_parent_idx'),
+            models.Index(fields=['parent', 'is_active'], name='category_parent_active_idx'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.name}"
@@ -58,6 +66,9 @@ class Category(models.Model):
         return self.name
 
 
+# ============================================================
+# UNIT MEASURE
+# ============================================================
 class UnitMeasure(models.Model):
     """
     Unité de mesure pour les produits
@@ -87,11 +98,19 @@ class UnitMeasure(models.Model):
         verbose_name = "Unité de mesure"
         verbose_name_plural = "Unités de mesure"
         ordering = ['name']
+        indexes = [
+            models.Index(fields=['name'], name='unit_name_idx'),
+            models.Index(fields=['is_active'], name='unit_active_idx'),
+            models.Index(fields=['type'], name='unit_type_idx'),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.symbol})"
 
 
+# ============================================================
+# PRODUCT
+# ============================================================
 class Product(models.Model):
     """
     Produit avec gestion des dates d'expiration
@@ -207,6 +226,21 @@ class Product(models.Model):
         verbose_name = "Produit"
         verbose_name_plural = "Produits"
         ordering = ['name']
+        indexes = [
+            # ✅ Index simples
+            models.Index(fields=['code'], name='product_code_idx'),
+            models.Index(fields=['barcode'], name='product_barcode_idx'),
+            models.Index(fields=['name'], name='product_name_idx'),
+            models.Index(fields=['status'], name='product_status_idx'),
+            models.Index(fields=['is_featured'], name='product_featured_idx'),
+            models.Index(fields=['has_expiry'], name='product_has_expiry_idx'),
+
+            # ✅ Index composites pour filtres fréquents
+            models.Index(fields=['category', 'status'], name='product_cat_status_idx'),
+            models.Index(fields=['status', 'name'], name='product_status_name_idx'),
+            models.Index(fields=['is_featured', 'status'], name='product_feat_status_idx'),
+            models.Index(fields=['-created_at'], name='product_created_idx'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.name}"
@@ -251,6 +285,9 @@ class Product(models.Model):
         self.save(update_fields=['status'])
 
 
+# ============================================================
+# WAREHOUSE
+# ============================================================
 class Warehouse(models.Model):
     """
     Entrepôt / Magasin
@@ -274,8 +311,7 @@ class Warehouse(models.Model):
         max_length=100, default='Sénégal', verbose_name="Pays")
 
     # Contact
-    phone = models.CharField(max_length=20, blank=True,
-                             verbose_name="Téléphone")
+    phone = models.CharField(max_length=20, blank=True, verbose_name="Téléphone")
     email = models.EmailField(blank=True, verbose_name="Email")
     manager = models.CharField(
         max_length=100, blank=True, verbose_name="Responsable")
@@ -299,6 +335,11 @@ class Warehouse(models.Model):
         verbose_name = "Entrepôt"
         verbose_name_plural = "Entrepôts"
         ordering = ['name']
+        indexes = [
+            models.Index(fields=['code'], name='warehouse_code_idx'),
+            models.Index(fields=['is_active'], name='warehouse_active_idx'),
+            models.Index(fields=['type'], name='warehouse_type_idx'),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.code})"
@@ -310,8 +351,9 @@ class Warehouse(models.Model):
         return 0
 
 
-# apps/produits_stocks/models.py
-
+# ============================================================
+# LOT
+# ============================================================
 class Lot(models.Model):
     """
     Lot de produits avec date d'expiration
@@ -411,9 +453,19 @@ class Lot(models.Model):
         verbose_name_plural = "Lots"
         ordering = ['expiry_date', 'created_at']
         indexes = [
-            models.Index(fields=['product', 'expiry_date']),
-            models.Index(fields=['status', 'expiry_date']),
-            models.Index(fields=['lot_number']),
+            # ✅ Index existants
+            models.Index(fields=['product', 'expiry_date'], name='lot_prod_expiry_idx'),
+            models.Index(fields=['status', 'expiry_date'], name='lot_status_expiry_idx'),
+            models.Index(fields=['lot_number'], name='lot_number_idx'),
+
+            # ✅ Nouveaux index pour filtres fréquents
+            models.Index(fields=['product', 'warehouse'], name='lot_prod_wh_idx'),
+            models.Index(fields=['product', 'warehouse', 'status'], name='lot_prod_wh_status_idx'),
+            models.Index(fields=['warehouse', 'expiry_date'], name='lot_wh_expiry_idx'),
+            models.Index(fields=['expiry_date'], name='lot_expiry_idx'),
+            models.Index(fields=['current_quantity'], name='lot_qty_idx'),
+            models.Index(fields=['is_blocked'], name='lot_blocked_idx'),
+            models.Index(fields=['-created_at'], name='lot_created_idx'),
         ]
 
     def __str__(self):
@@ -448,10 +500,6 @@ class Lot(models.Model):
 
         # Appel du save parent SANS mettre à jour le stock automatiquement
         super().save(*args, **kwargs)
-
-        # NOTE: La mise à jour du stock est maintenant gérée MANUELLEMENT
-        # dans les vues/sérialiseurs pour éviter les doublons
-        # Ne pas appeler stock.update_quantity() ici !
 
     @property
     def days_until_expiry(self):
@@ -502,7 +550,6 @@ class Lot(models.Model):
         if quantity <= self.available_quantity:
             self.reserved_quantity += quantity
             self.save()
-            # Mettre à jour le stock après réservation
             self._update_stock()
             return True
         return False
@@ -511,7 +558,6 @@ class Lot(models.Model):
         """Libère une réservation"""
         self.reserved_quantity = max(0, self.reserved_quantity - quantity)
         self.save()
-        # Mettre à jour le stock après libération
         self._update_stock()
 
     def consume(self, quantity):
@@ -521,7 +567,6 @@ class Lot(models.Model):
             self.reserved_quantity = max(0, self.reserved_quantity - quantity)
             self.last_used_date = date.today()
             self.save()
-            # Mettre à jour le stock après consommation
             self._update_stock()
             return True
         return False
@@ -533,7 +578,6 @@ class Lot(models.Model):
         self.block_reason = reason or ''
         self.blocked_date = date.today()
         self.save()
-        # Mettre à jour le stock après blocage
         self._update_stock()
 
     def unblock(self):
@@ -542,13 +586,12 @@ class Lot(models.Model):
         self.block_reason = ''
         self.blocked_date = None
         self.save()
-        # Mettre à jour le stock après déblocage
         self._update_stock()
 
     def _update_stock(self):
         """
         Méthode privée pour mettre à jour le stock
-        Utilisée uniquement pour les opérations manuelles (réservation, consommation, etc.)
+        Utilisée uniquement pour les opérations manuelles
         """
         if self.warehouse:
             try:
@@ -558,13 +601,13 @@ class Lot(models.Model):
                     warehouse=self.warehouse
                 )
                 stock.update_quantity()
-            except Exception as e:
-                # Ignorer les erreurs
+            except Exception:
                 pass
 
-# apps/produits_stocks/models.py
 
-
+# ============================================================
+# STOCK
+# ============================================================
 class Stock(models.Model):
     """
     Stock par produit et entrepôt
@@ -596,8 +639,11 @@ class Stock(models.Model):
         verbose_name_plural = "Stocks"
         unique_together = ['product', 'warehouse']
         indexes = [
-            models.Index(fields=['product', 'warehouse']),
-            models.Index(fields=['quantity']),
+            models.Index(fields=['product', 'warehouse'], name='stock_prod_wh_idx'),
+            models.Index(fields=['quantity'], name='stock_qty_idx'),
+            models.Index(fields=['warehouse', 'quantity'], name='stock_wh_qty_idx'),
+            models.Index(fields=['product'], name='stock_product_idx'),
+            models.Index(fields=['warehouse'], name='stock_warehouse_idx'),
         ]
 
     def __str__(self):
@@ -637,12 +683,8 @@ class Stock(models.Model):
             total=Sum('current_quantity')
         )['total'] or 0
 
-        # Mettre à jour UNIQUEMENT le champ quantity
-        # Ne pas modifier reserved_quantity ici
         self.quantity = total
         self.save(update_fields=['quantity', 'last_update'])
-
-        # Mettre à jour le statut du produit
         self.product.update_status()
         return total
 
@@ -697,15 +739,16 @@ class Stock(models.Model):
             for item in lots:
                 item['lot'].consume(item['quantity'])
 
-            # IMPORTANT: Ne pas modifier quantity manuellement !
-            # On recalcule à partir des lots après consommation
             self.reserved_quantity = max(0, self.reserved_quantity - quantity)
-            self.update_quantity()  # Recalcul automatique depuis les lots
+            self.update_quantity()
 
             return True, lots
         return False, "Impossible de consommer"
 
 
+# ============================================================
+# STOCK MOVEMENT
+# ============================================================
 class StockMovement(models.Model):
     """
     Historique des mouvements de stock
@@ -788,9 +831,13 @@ class StockMovement(models.Model):
         verbose_name_plural = "Mouvements de stock"
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['product', 'created_at']),
-            models.Index(fields=['movement_type']),
-            models.Index(fields=['reference_type', 'reference_id']),
+            models.Index(fields=['product', '-created_at'], name='movement_prod_date_idx'),
+            models.Index(fields=['movement_type'], name='movement_type_idx'),
+            models.Index(fields=['reference_type', 'reference_id'], name='movement_ref_idx'),
+            models.Index(fields=['-created_at'], name='movement_date_idx'),
+            models.Index(fields=['lot'], name='movement_lot_idx'),
+            models.Index(fields=['from_warehouse'], name='movement_from_wh_idx'),
+            models.Index(fields=['to_warehouse'], name='movement_to_wh_idx'),
         ]
 
     def __str__(self):
@@ -800,13 +847,11 @@ class StockMovement(models.Model):
         """
         Sauvegarde du mouvement :
         - Calcule previous_quantity et new_quantity à partir du lot (si présent)
-        - NE MODIFIE PAS le lot (la modification est déjà faite dans les vues)
+        - NE MODIFIE PAS le lot
         - Met à jour le stock (recalcul à partir des lots) après la sauvegarde
         """
-        # Calcul des quantités historiques (sans modifier le lot)
         if self.lot:
             self.previous_quantity = self.lot.current_quantity
-            # On calcule la nouvelle quantité théorique (pour l'historique)
             if self.movement_type in ['sale_out', 'transfer_out', 'adjustment_minus',
                                       'expired_out', 'damaged_out', 'return_out']:
                 self.new_quantity = self.previous_quantity - self.quantity
@@ -816,10 +861,8 @@ class StockMovement(models.Model):
             self.previous_quantity = 0
             self.new_quantity = 0
 
-        # Sauvegarde du mouvement (ne modifie pas le lot)
         super().save(*args, **kwargs)
 
-        # Mise à jour du stock (recalcul à partir des lots)
         if self.lot and self.lot.warehouse:
             stock, _ = Stock.objects.get_or_create(
                 product=self.product,
@@ -828,6 +871,9 @@ class StockMovement(models.Model):
             stock.update_quantity()
 
 
+# ============================================================
+# EXPIRY ALERT
+# ============================================================
 class ExpiryAlert(models.Model):
     """
     Alertes pour les produits qui expirent bientôt
@@ -885,8 +931,11 @@ class ExpiryAlert(models.Model):
         verbose_name_plural = "Alertes d'expiration"
         ordering = ['days_left', 'created_at']
         indexes = [
-            models.Index(fields=['product', 'is_processed']),
-            models.Index(fields=['severity', 'is_read']),
+            models.Index(fields=['product', 'is_processed'], name='alert_prod_proc_idx'),
+            models.Index(fields=['severity', 'is_read'], name='alert_sev_read_idx'),
+            models.Index(fields=['is_processed'], name='alert_processed_idx'),
+            models.Index(fields=['is_read'], name='alert_read_idx'),
+            models.Index(fields=['-created_at'], name='alert_created_idx'),
         ]
 
     def __str__(self):
@@ -903,6 +952,9 @@ class ExpiryAlert(models.Model):
         self.save()
 
 
+# ============================================================
+# INVENTORY
+# ============================================================
 class Inventory(models.Model):
     """
     Inventaire physique
@@ -963,6 +1015,10 @@ class Inventory(models.Model):
         verbose_name = "Inventaire"
         verbose_name_plural = "Inventaires"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['warehouse', '-created_at'], name='inv_wh_date_idx'),
+            models.Index(fields=['status'], name='inv_status_idx'),
+        ]
 
     def __str__(self):
         return f"{self.name} - {self.warehouse.name} ({self.status})"
@@ -993,6 +1049,9 @@ class Inventory(models.Model):
         self.complete()
 
 
+# ============================================================
+# INVENTORY LINE
+# ============================================================
 class InventoryLine(models.Model):
     """
     Ligne d'inventaire
@@ -1045,6 +1104,11 @@ class InventoryLine(models.Model):
         verbose_name = "Ligne d'inventaire"
         verbose_name_plural = "Lignes d'inventaire"
         unique_together = ['inventory', 'product', 'lot']
+        indexes = [
+            models.Index(fields=['inventory', 'product'], name='invline_inv_prod_idx'),
+            models.Index(fields=['is_verified'], name='invline_verified_idx'),
+            models.Index(fields=['inventory'], name='invline_inv_idx'),
+        ]
 
     def __str__(self):
         lot_info = f" - Lot {self.lot.lot_number}" if self.lot else ""
@@ -1103,6 +1167,9 @@ class InventoryLine(models.Model):
             self.verify(user)
 
 
+# ============================================================
+# TRANSFER
+# ============================================================
 class Transfer(models.Model):
     STATUS_CHOICES = (
         ('draft', 'Brouillon'),
@@ -1127,14 +1194,42 @@ class Transfer(models.Model):
     validated_by = models.ForeignKey(
         CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='validated_transfers')
 
+    class Meta:
+        verbose_name = "Transfert"
+        verbose_name_plural = "Transferts"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['reference_number'], name='transfer_ref_idx'),
+            models.Index(fields=['status'], name='transfer_status_idx'),
+            models.Index(fields=['from_warehouse'], name='transfer_from_wh_idx'),
+            models.Index(fields=['to_warehouse'], name='transfer_to_wh_idx'),
+            models.Index(fields=['-created_at'], name='transfer_date_idx'),
+        ]
 
+    def __str__(self):
+        return f"{self.reference_number} ({self.status})"
+
+
+# ============================================================
+# TRANSFER ITEM
+# ============================================================
 class TransferItem(models.Model):
     transfer = models.ForeignKey(
         Transfer, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     quantity = models.IntegerField()
-    # On peut stocker les lots source et destination si besoin
     source_lot = models.ForeignKey(
         Lot, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     destination_lot = models.ForeignKey(
         Lot, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    class Meta:
+        verbose_name = "Ligne de transfert"
+        verbose_name_plural = "Lignes de transfert"
+        indexes = [
+            models.Index(fields=['transfer'], name='transferitem_transfer_idx'),
+            models.Index(fields=['product'], name='transferitem_product_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.transfer.reference_number} - {self.product.name} x{self.quantity}"
