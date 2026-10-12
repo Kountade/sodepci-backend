@@ -365,13 +365,9 @@ class LigneVenteCreateSerializer(serializers.ModelSerializer):
 # ============================================================
 # VENTE
 # ============================================================
-
 class VenteListSerializer(serializers.ModelSerializer):
     """
     ✅ Serializer OPTIMISÉ pour les listes.
-    - Utilise client_id/warehouse_id au lieu des objets complets
-    - Pas de SerializerMethodField coûteux
-    - Compatible avec select_related + annotate
     """
     client_name = serializers.CharField(source='client.name', read_only=True)
     status_display = serializers.CharField(
@@ -403,9 +399,15 @@ class VenteListSerializer(serializers.ModelSerializer):
         return f"{obj.total:,.0f} FCFA" if obj.total else "0 FCFA"
 
     def get_has_facture(self, obj):
-        # ✅ Utilise l'annotation `has_invoice_annotated` au lieu d'une requête
-        return getattr(obj, 'has_invoice_annotated', False)
-
+        # ✅ CORRECTION : ne dépend plus de l'annotation `has_invoice_annotated`
+        # Utilise soit l'annotation (si disponible) soit une requête directe
+        if hasattr(obj, 'has_invoice_annotated'):
+            return obj.has_invoice_annotated
+        # ✅ Fallback : utilisera le prefetch si disponible, sinon 1 requête
+        try:
+            return obj.invoices.exists()
+        except Exception:
+            return False
 
 class VenteDetailSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.name', read_only=True)

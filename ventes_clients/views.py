@@ -387,11 +387,15 @@ class DevisViewSet(viewsets.ModelViewSet):
 # apps/ventes_clients/views.py
 
 # apps/ventes_clients/views.py
-# apps/ventes_clients/views.py
 
 class VenteViewSet(viewsets.ModelViewSet):
     """
     ✅ ViewSet optimisé pour gérer 10 000+ ventes.
+    - Pagination serveur
+    - select_related + prefetch_related (pas d'annotation Exists)
+    - Stats calculées en SQL via .values().annotate()
+    - ✅ CORRECTION : Les stats sont retournées AU MÊME NIVEAU que results
+      dans la réponse paginée pour que le frontend affiche correctement le tableau.
     """
     queryset = Vente.objects.all()
     permission_classes = [permissions.IsAuthenticated]
@@ -415,18 +419,17 @@ class VenteViewSet(viewsets.ModelViewSet):
         return context
 
     # ================================================================
-    # QUERYSET OPTIMISÉ (pour sérialisation UNIQUEMENT)
+    # ✅ QUERYSET OPTIMISÉ (pour sérialisation UNIQUEMENT)
     # ================================================================
     def get_queryset(self):
-        """✅ Queryset ENRICHI (select_related + annotate)."""
+        """
+        ✅ Queryset ENRICHI (select_related + prefetch_related).
+        ⚠️ Pas d'annotation Exists (bug Django avec select_related + filtres dates).
+        """
         queryset = (
             Vente.objects
             .select_related('client', 'warehouse', 'created_by')
-            .annotate(
-                has_invoice_annotated=Exists(
-                    Facture.objects.filter(sale=OuterRef('pk'))
-                )
-            )
+            .prefetch_related('invoices')  # ✅ Remplace l'annotation Exists
             .order_by('-sale_date', '-id')
         )
 
@@ -452,6 +455,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         if payment_status:
             queryset = queryset.filter(payment_status=payment_status)
 
+        # ✅ Filtres INDEX-FRIENDLY (pas de __date)
         date_from = self.request.query_params.get('date_from')
         if date_from:
             try:
@@ -493,7 +497,9 @@ class VenteViewSet(viewsets.ModelViewSet):
         """
         ✅ Queryset TOTALEMENT NEUF pour les agrégations.
         - Repart de Vente.objects.all() (manager brut)
-        - AUCUN select_related / annotate
+        - AUCUN select_related / annotate / prefetch
+        - ✅ Applique EXACTEMENT les mêmes filtres que get_queryset()
+          (sauf les dates qui sont passées en paramètre)
         """
         qs = Vente.objects.all()
 
@@ -528,10 +534,118 @@ class VenteViewSet(viewsets.ModelViewSet):
         if warehouse:
             qs = qs.filter(warehouse_id=warehouse)
 
+        # ✅ AJOUT : filtres manquants pour cohérence avec get_queryset()
+        min_total = self.request.query_params.get('min_total')
+        if min_total:
+            qs = qs.filter(total__gte=min_total)
+
+        max_total = self.request.query_params.get('max_total')
+        if max_total:
+            qs = qs.filter(total__lte=max_total)
+
         return qs
 
     # ================================================================
-    # 1. VENTES PAR DATE (CORRIGÉ DÉFINITIVEMENT)
+    # ✅ HELPER : Construire la réponse paginée avec stats
+    # ================================================================
+    def _paginated_response_with_stats(self, base_qs, stats, extra_data=None):
+        """
+        ✅ Construit une réponse paginée avec les stats au MÊME NIVEAU
+        que 'results' (tableau), pour compatibilité frontend.
+
+        Structure retournée:
+        {
+            "count": N,
+            "next": url,
+            "previous": url,
+            "results": [...],   ← TABLEAU ✅
+            "stats": {...},     ← Stats accessibles ✅
+            ...extra_data
+        }
+        """
+        page = self.paginate_queryset(base_qs)
+
+        if page is not None:
+            serializer = VenteListSerializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            # ✅ Ajouter les stats au même niveau que 'results'
+            response.data['stats'] = stats
+            if extra_data:
+                for key, value in extra_data.items():
+                    response.data[key] = value
+            return response
+
+        # Fallback si pagination désactivée
+        serializer = VenteListSerializer(base_qs, many=True)
+        data = {
+            'count': base_qs.count(),
+            'next': None,
+            'previous': None,
+            'results': serializer.data,
+            'stats': stats,
+        }
+        if extra_data:
+            data.update(extra_data)
+        return Response(data)
+
+    # ================================================================
+    # ✅ HELPER : Calculer les stats de manière sécurisée
+    # ================================================================
+    def _calculate_stats(self, date_start=None, date_end=None):
+        """
+        ✅ Calcule les stats via .values().annotate() — sans conflit de noms.
+        Retourne un dict avec total, total_amount, by_status, by_payment_status.
+        """
+        try:
+            stats_qs = self._stats_queryset(
+                date_start=date_start,
+                date_end=date_end
+            )
+
+            stats_result = stats_qs.values('status').annotate(
+                count=Count('id'),
+                total_amount=Sum('total'),
+            )
+
+            total_count = 0
+            total_amount = Decimal('0')
+            by_status = {}
+
+            for row in stats_result:
+                status_val = row['status']
+                by_status[status_val] = row['count']
+                total_count += row['count']
+                total_amount += row['total_amount'] or Decimal('0')
+
+            payment_result = stats_qs.values('payment_status').annotate(
+                count=Count('id')
+            )
+            by_payment_status = {
+                row['payment_status']: row['count']
+                for row in payment_result
+            }
+
+            logger.info(f"✅ Stats calculées : {total_count} ventes, "
+                        f"total={total_amount}")
+
+            return {
+                'total': total_count,
+                'total_amount': total_amount,
+                'by_status': by_status,
+                'by_payment_status': by_payment_status,
+            }
+
+        except Exception as e:
+            logger.exception("Erreur calcul stats")
+            return {
+                'total': 0,
+                'total_amount': Decimal('0'),
+                'by_status': {},
+                'by_payment_status': {},
+            }
+
+    # ================================================================
+    # 1. VENTES PAR DATE - ✅ CORRIGÉ
     # ================================================================
     @action(detail=False, methods=['get'], url_path='by-date')
     def get_by_date(self, request):
@@ -551,84 +665,31 @@ class VenteViewSet(viewsets.ModelViewSet):
         date_start = dt.datetime.combine(target_date, dt.datetime.min.time())
         date_end = date_start + dt.timedelta(days=1)
 
-        # ============================================================
-        # ✅ STATS via .values().annotate() — SANS CONFLIT DE NOMS
-        # ============================================================
-        try:
-            stats_qs = self._stats_queryset(
-                date_start=date_start,
-                date_end=date_end
-            )
+        # ✅ Calcul des stats (avec les mêmes filtres que le queryset)
+        stats = self._calculate_stats(
+            date_start=date_start,
+            date_end=date_end
+        )
 
-            # ✅ IMPORTANT : alias "count" (JAMAIS "total")
-            stats_result = stats_qs.values('status').annotate(
-                count=Count('id'),              # ✅ "count" au lieu de "total"
-                total_amount=Sum('total'),      # ✅ "total" = champ Vente.total
-            )
-
-            total_count = 0
-            total_amount = Decimal('0')
-            by_status = {}
-
-            for row in stats_result:
-                status_val = row['status']
-                by_status[status_val] = row['count']        # ✅ row['count']
-                total_count += row['count']                  # ✅ row['count']
-                total_amount += row['total_amount'] or Decimal('0')
-
-            # ✅ GROUP BY payment_status
-            payment_result = stats_qs.values('payment_status').annotate(
-                count=Count('id')  # ✅ "count" au lieu de "total"
-            )
-            by_payment_status = {
-                row['payment_status']: row['count']
-                for row in payment_result
-            }
-
-            stats = {
-                'total': total_count,
-                'total_amount': total_amount,
-                'by_status': by_status,
-                'by_payment_status': by_payment_status,
-            }
-
-            logger.info(f"✅ Stats by-date : {total_count} ventes")
-
-        except Exception as e:
-            logger.exception("Erreur calcul stats by-date")
-            stats = {
-                'total': 0,
-                'total_amount': Decimal('0'),
-                'by_status': {},
-                'by_payment_status': {},
-            }
-
-        # ============================================================
-        # ✅ PAGINATION
-        # ============================================================
+        # ✅ Queryset paginé
         base_qs = self.get_queryset().filter(
             sale_date__gte=date_start,
             sale_date__lt=date_end
         )
 
-        page = self.paginate_queryset(base_qs)
-        if page is not None:
-            serializer = VenteListSerializer(page, many=True)
-            return self.get_paginated_response({
-                'date': target_date.isoformat(),
-                'stats': stats,
-                'results': serializer.data
-            })
+        logger.info(f"🔍 by-date: date={target_date}, "
+                    f"base_qs.count()={base_qs.count()}, "
+                    f"stats.total={stats['total']}")
 
-        serializer = VenteListSerializer(base_qs, many=True)
-        return Response({
-            'date': target_date.isoformat(),
-            'stats': stats,
-            'results': serializer.data
-        })
+        # ✅ Réponse paginée avec stats au même niveau
+        return self._paginated_response_with_stats(
+            base_qs=base_qs,
+            stats=stats,
+            extra_data={'date': target_date.isoformat()}
+        )
 
     # ================================================================
-    # 2. VENTES PAR PLAGE DE DATES (CORRIGÉ DÉFINITIVEMENT)
+    # 2. VENTES PAR PLAGE DE DATES - ✅ CORRIGÉ
     # ================================================================
     @action(detail=False, methods=['get'], url_path='date-range')
     def get_date_range(self, request):
@@ -659,66 +720,31 @@ class VenteViewSet(viewsets.ModelViewSet):
 
         date_end = date_end.replace(hour=23, minute=59, second=59)
 
-        # ============================================================
-        # ✅ STATS via .values().annotate() — SANS CONFLIT
-        # ============================================================
-        try:
-            stats_qs = self._stats_queryset(
-                date_start=date_start,
-                date_end=date_end
-            )
+        # ✅ Calcul des stats
+        stats = self._calculate_stats(
+            date_start=date_start,
+            date_end=date_end
+        )
 
-            stats_result = stats_qs.values('status').annotate(
-                count=Count('id'),              # ✅ "count" (pas "total")
-                total_amount=Sum('total'),      # ✅ "total" = champ Vente.total
-            )
-
-            total_count = 0
-            total_amount = Decimal('0')
-
-            for row in stats_result:
-                total_count += row['count']
-                total_amount += row['total_amount'] or Decimal('0')
-
-            stats = {
-                'total': total_count,
-                'total_amount': total_amount,
-            }
-
-            logger.info(f"✅ Stats date-range : {total_count} ventes")
-
-        except Exception as e:
-            logger.exception("Erreur calcul stats date-range")
-            stats = {
-                'total': 0,
-                'total_amount': Decimal('0'),
-            }
-
-        # ============================================================
-        # ✅ PAGINATION
-        # ============================================================
+        # ✅ Queryset paginé
         base_qs = self.get_queryset().filter(
             sale_date__gte=date_start,
             sale_date__lte=date_end
         )
 
-        page = self.paginate_queryset(base_qs)
-        if page is not None:
-            serializer = VenteListSerializer(page, many=True)
-            return self.get_paginated_response({
+        logger.info(f"🔍 date-range: {date_from} → {date_to}, "
+                    f"base_qs.count()={base_qs.count()}, "
+                    f"stats.total={stats['total']}")
+
+        # ✅ Réponse paginée avec stats au même niveau
+        return self._paginated_response_with_stats(
+            base_qs=base_qs,
+            stats=stats,
+            extra_data={
                 'date_from': date_from,
                 'date_to': date_to,
-                'stats': stats,
-                'results': serializer.data
-            })
-
-        serializer = VenteListSerializer(base_qs, many=True)
-        return Response({
-            'date_from': date_from,
-            'date_to': date_to,
-            'stats': stats,
-            'results': serializer.data
-        })
+            }
+        )
 
     # ================================================================
     # 3. CONFIRMER UNE VENTE
@@ -1211,7 +1237,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     # ================================================================
-    # 14. STATISTIQUES (CORRIGÉ DÉFINITIVEMENT)
+    # 14. STATISTIQUES
     # ================================================================
     @action(detail=False, methods=['get'])
     def stats(self, request):
@@ -1226,10 +1252,9 @@ class VenteViewSet(viewsets.ModelViewSet):
         try:
             ventes = self._stats_queryset(date_start=start_date)
 
-            # ✅ Alias "count" au lieu de "total"
             stats_result = ventes.values('status').annotate(
-                count=Count('id'),              # ✅ "count"
-                total_montant=Sum('total'),     # ✅ "total" = champ
+                count=Count('id'),
+                total_montant=Sum('total'),
                 total_paye=Sum('amount_paid'),
             )
 
@@ -1240,16 +1265,15 @@ class VenteViewSet(viewsets.ModelViewSet):
 
             for row in stats_result:
                 status_val = row['status']
-                by_status[status_val] = row['count']          # ✅ row['count']
-                total_ventes += row['count']                   # ✅ row['count']
+                by_status[status_val] = row['count']
+                total_ventes += row['count']
                 total_montant += row['total_montant'] or Decimal('0')
                 total_paye += row['total_paye'] or Decimal('0')
 
             total_due = total_montant - total_paye
 
-            # ✅ Alias "count" au lieu de "total"
             payment_result = ventes.values('payment_status').annotate(
-                count=Count('id')  # ✅ "count"
+                count=Count('id')
             )
             by_payment_status = {
                 row['payment_status']: row['count']
