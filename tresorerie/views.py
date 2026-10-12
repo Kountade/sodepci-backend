@@ -49,7 +49,7 @@ class CompteBancaireViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# MOUVEMENT TRÉSORERIE VIEWSET - CORRIGÉ
+# MOUVEMENT TRÉSORERIE VIEWSET - COMPLET
 # ============================================================
 
 class MouvementTresorerieViewSet(viewsets.ModelViewSet):
@@ -58,7 +58,6 @@ class MouvementTresorerieViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend,
                        filters.SearchFilter, filters.OrderingFilter]
 
-    # ✅ CORRECTION : Supprimer les champs qui n'existent pas
     filterset_fields = [
         'warehouse',
         'type_mouvement',
@@ -68,7 +67,6 @@ class MouvementTresorerieViewSet(viewsets.ModelViewSet):
         'caisse',
         'compte_bancaire',
         'rapproche'
-        # ❌ Supprimer: 'vente', 'purchase_order', 'facture_vente', 'paiement'
     ]
     search_fields = ['reference', 'libelle',
                      'source_reference', 'reference_externe']
@@ -110,6 +108,131 @@ class MouvementTresorerieViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK
         )
 
+    # ============================================================
+    # ✅ NOUVELLE ACTION : SYNCHRONISATION COMPTABLE
+    # ============================================================
+    @action(detail=True, methods=['post'], url_path='sync-comptabilite')
+    def sync_comptabilite(self, request, pk=None):
+        """
+        Force la création de l'écriture comptable associée à ce mouvement.
+        Utile pour les mouvements créés avant l'activation du signal
+        ou en cas d'échec de la synchronisation automatique.
+
+        POST /mouvements/{id}/sync-comptabilite/
+        """
+        mouvement = self.get_object()
+
+        if mouvement.status != 'effectue':
+            return Response(
+                {'detail': 'Seuls les mouvements effectués peuvent être synchronisés.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            from finances.models import EcritureComptable
+
+            # Vérifier si l'écriture existe déjà
+            existing = EcritureComptable.objects.filter(
+                reference=mouvement.reference,
+                type='tresorerie'
+            ).first()
+
+            if existing:
+                return Response({
+                    'detail': 'Écriture déjà existante',
+                    'ecriture_id': existing.id,
+                    'numero': existing.numero,
+                    'created': False
+                })
+
+            # Déclencher le signal manuellement
+            from finances.signals import creer_ecriture_depuis_mouvement
+            creer_ecriture_depuis_mouvement(
+                sender=MouvementTresorerie,
+                instance=mouvement,
+                created=False
+            )
+
+            # Récupérer l'écriture créée
+            ecriture = EcritureComptable.objects.filter(
+                reference=mouvement.reference,
+                type='tresorerie'
+            ).first()
+
+            if ecriture:
+                return Response({
+                    'detail': 'Écriture créée avec succès',
+                    'ecriture_id': ecriture.id,
+                    'numero': ecriture.numero,
+                    'created': True
+                })
+            else:
+                return Response(
+                    {'detail': "Échec de la création de l'écriture. Vérifiez les logs."},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+        except ImportError as e:
+            return Response(
+                {'error': f"Module finances indisponible : {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    # ============================================================
+    # ✅ NOUVELLE ACTION : VÉRIFIER L'ÉCRITURE ASSOCIÉE
+    # ============================================================
+    @action(detail=True, methods=['get'], url_path='ecriture')
+    def get_ecriture(self, request, pk=None):
+        """
+        Retourne l'écriture comptable associée à ce mouvement.
+
+        GET /mouvements/{id}/ecriture/
+        """
+        mouvement = self.get_object()
+
+        try:
+            from finances.models import EcritureComptable
+
+            ecriture = EcritureComptable.objects.filter(
+                reference=mouvement.reference,
+                type='tresorerie'
+            ).first()
+
+            if ecriture:
+                return Response({
+                    'has_ecriture': True,
+                    'ecriture': {
+                        'id': ecriture.id,
+                        'numero': ecriture.numero,
+                        'date_ecriture': ecriture.date_ecriture,
+                        'compte_debit': ecriture.compte_debit.numero,
+                        'compte_debit_nom': ecriture.compte_debit.nom,
+                        'compte_credit': ecriture.compte_credit.numero,
+                        'compte_credit_nom': ecriture.compte_credit.nom,
+                        'montant': str(ecriture.montant),
+                        'total': str(ecriture.total),
+                        'statut': ecriture.statut,
+                        'description': ecriture.description,
+                    }
+                })
+            else:
+                return Response({
+                    'has_ecriture': False,
+                    'ecriture': None
+                })
+
+        except ImportError:
+            return Response({
+                'has_ecriture': False,
+                'ecriture': None,
+                'error': 'Module finances indisponible'
+            })
+
 
 # ============================================================
 # FRAIS VIEWSET
@@ -120,7 +243,6 @@ class FraisViewSet(viewsets.ModelViewSet):
     serializer_class = FraisSerializer
     filter_backends = [DjangoFilterBackend,
                        filters.SearchFilter, filters.OrderingFilter]
-    # ❌ Supprimer 'supplier' si n'existe pas
     filterset_fields = ['warehouse', 'categorie', 'status']
     search_fields = ['reference', 'titre', 'beneficiaire']
     ordering_fields = ['date_frais', 'montant', 'created_at']

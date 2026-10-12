@@ -1,36 +1,30 @@
 # apps/ventes_clients/views.py
 # ============================================================
-# IMPORTATIONS AVEC ALIAS
+# VIEWS COMPLET OPTIMISÉ
 # ============================================================
 
-from django.db.models import Sum, Q
-from decimal import Decimal
 import logging
-from io import BytesIO
-import json
-from datetime import date, timedelta
 import datetime as dt
+from datetime import date, timedelta
+from decimal import Decimal
+
+from django.db import transaction
+from django.db.models import (
+    Q, Sum, Count, F, Exists, OuterRef,
+    ExpressionWrapper, DecimalField
+)
+from django.core.exceptions import ValidationError
+from django.utils import timezone
+from django.http import HttpResponse
 
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.db.models import Q, Sum, Count
-from django.utils import timezone
-from django.http import HttpResponse
-from django.db import transaction
-from django.core.exceptions import ValidationError
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_CENTER
-from PIL import Image as PILImage
 
 # === Modèles ===
 from .models import (
     Client, ClientWallet, Vente, LigneVente, Paiement, Facture,
-    Avoir, Taxe, Remise, Devis, LigneDevis
+    Avoir, Taxe, Remise, Devis, LigneDevis, WalletTransaction
 )
 from produits_stocks.models import Stock, StockMovement, Warehouse
 from users.permissions import IsAdmin, IsGestionnaire, IsCaissier
@@ -54,8 +48,8 @@ from .serializers import (
     WalletTransactionSerializer
 )
 
-# === Trésorerie ===
-from tresorerie.models import MouvementTresorerie, Caisse
+# === Pagination ===
+from .pagination import VentePagination, OptimizedPagination, LargePagination
 
 logger = logging.getLogger(__name__)
 
@@ -64,89 +58,65 @@ logger = logging.getLogger(__name__)
 # FONCTION UTILITAIRE POUR CRÉER UN MOUVEMENT DE PAIEMENT
 # ============================================================
 def creer_mouvement_paiement_manuel(paiement, facture, request_user):
-    """
-    Crée un mouvement de trésorerie pour un paiement.
-    Retourne le mouvement créé ou None.
-    """
+    """Crée un mouvement de trésorerie pour un paiement."""
     logger.info(
-        f"🔍 creer_mouvement_paiement_manuel - paiement {paiement.id}, facture {facture.invoice_number}")
+        f"🔍 creer_mouvement_paiement_manuel - paiement {paiement.id}, "
+        f"facture {facture.invoice_number}"
+    )
 
     sale = facture.sale
     if not sale:
-        logger.warning(
-            f"❌ Paiement {paiement.id} : aucune vente associée à la facture {facture.invoice_number}")
+        logger.warning(f"❌ Paiement {paiement.id} : aucune vente associée")
         return None
 
-    logger.info(
-        f"   Vente associée : {sale.invoice_number}, entrepôt={sale.warehouse}")
-
     if not sale.warehouse:
-        logger.warning(
-            f"❌ Paiement {paiement.id} : la vente {sale.invoice_number} n'a pas d'entrepôt")
+        logger.warning(f"❌ Paiement {paiement.id} : pas d'entrepôt")
         return None
 
     try:
         from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
 
-        # ✅ VÉRIFIER SI UN MOUVEMENT EXISTE DÉJÀ
         existing_movement = MouvementTresorerie.objects.filter(
             source_type='paiement_client',
             source_id=paiement.id
         ).first()
 
         if existing_movement:
-            logger.info(
-                f"ℹ️ Paiement {paiement.id} : mouvement déjà existant ({existing_movement.reference})")
+            logger.info(f"ℹ️ Mouvement déjà existant")
             return existing_movement
 
-        # Récupérer la caisse ou le compte de destination
         caisse = None
         compte = None
 
         if hasattr(paiement, 'caisse_destination_id') and paiement.caisse_destination_id:
             try:
                 caisse = Caisse.objects.get(id=paiement.caisse_destination_id)
-                logger.info(f"✅ Caisse trouvée : {caisse.nom}")
             except Caisse.DoesNotExist:
-                logger.warning(
-                    f"⚠️ Caisse ID {paiement.caisse_destination_id} non trouvée")
+                pass
 
         if hasattr(paiement, 'compte_destination_id') and paiement.compte_destination_id:
             try:
                 compte = CompteBancaire.objects.get(
                     id=paiement.compte_destination_id)
-                logger.info(f"✅ Compte trouvé : {compte.nom}")
             except CompteBancaire.DoesNotExist:
-                logger.warning(
-                    f"⚠️ Compte ID {paiement.compte_destination_id} non trouvé")
+                pass
 
         if not caisse and not compte:
-            logger.info(
-                "ℹ️ Aucune destination spécifiée, recherche de la caisse par défaut...")
             caisse = Caisse.objects.filter(
                 warehouse=sale.warehouse,
                 is_default=True
             ).first()
 
-            if caisse:
-                logger.info(f"✅ Caisse par défaut trouvée : {caisse.nom}")
-            else:
+            if not caisse:
                 caisse = Caisse.objects.filter(
                     warehouse=sale.warehouse,
                     is_active=True
                 ).first()
-                if caisse:
-                    logger.info(f"✅ Caisse active trouvée : {caisse.nom}")
 
         if not caisse and not compte:
-            logger.warning(
-                f"❌ Paiement {paiement.id} : aucune caisse ou compte disponible pour l'entrepôt {sale.warehouse}")
+            logger.warning(f"❌ Aucune destination pour paiement {paiement.id}")
             return None
 
-        logger.info(
-            f"✅ Destination finale : {caisse.nom if caisse else compte.nom}")
-
-        # Créer le mouvement d'encaissement
         mouvement = MouvementTresorerie.objects.create(
             type_mouvement='encaissement',
             warehouse=sale.warehouse,
@@ -167,27 +137,19 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
         if caisse:
             caisse.solde_actuel += paiement.amount
             caisse.save(update_fields=['solde_actuel', 'updated_at'])
-            logger.info(
-                f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
 
         if compte:
             compte.solde_actuel += paiement.amount
             compte.save(update_fields=['solde_actuel', 'updated_at'])
-            logger.info(
-                f"💰 Compte {compte.nom} augmenté de {paiement.amount:,.0f} FCFA")
 
-        logger.info(
-            f"✅ Mouvement d'encaissement créé pour paiement {paiement.id} : {mouvement.reference}")
+        logger.info(f"✅ Mouvement créé : {mouvement.reference}")
         return mouvement
 
     except ImportError as e:
-        logger.error(f"❌ Erreur d'importation du module trésorerie: {e}")
+        logger.error(f"❌ Import trésorerie échoué: {e}")
         return None
     except Exception as e:
-        logger.error(
-            f"❌ Erreur lors de la création du mouvement pour paiement {paiement.id} : {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ Erreur mouvement: {e}")
         return None
 
 
@@ -197,6 +159,7 @@ def creer_mouvement_paiement_manuel(paiement, facture, request_user):
 class ClientViewSet(viewsets.ModelViewSet):
     queryset = Client.objects.all()
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = LargePagination
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -210,8 +173,7 @@ class ClientViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(
                 Q(name__icontains=search) |
                 Q(code__icontains=search) |
-                Q(phone__icontains=search) |
-                Q(email__icontains=search)
+                Q(phone__icontains=search)
             )
         type_filter = self.request.query_params.get('type')
         if type_filter:
@@ -219,9 +181,6 @@ class ClientViewSet(viewsets.ModelViewSet):
         statut = self.request.query_params.get('statut')
         if statut:
             queryset = queryset.filter(statut=statut)
-        is_favorite = self.request.query_params.get('is_favorite')
-        if is_favorite == 'true':
-            queryset = queryset.filter(is_favorite=True)
         return queryset
 
     def perform_create(self, serializer):
@@ -230,14 +189,14 @@ class ClientViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def sales(self, request, pk=None):
         client = self.get_object()
-        sales = client.sales.all().order_by('-sale_date')
+        sales = client.sales.all().order_by('-sale_date')[:50]
         serializer = VenteListSerializer(sales, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
     def devis(self, request, pk=None):
         client = self.get_object()
-        devis = client.devis.all().order_by('-devis_date')
+        devis = client.devis.all().order_by('-devis_date')[:50]
         serializer = DevisListSerializer(devis, many=True)
         return Response(serializer.data)
 
@@ -245,61 +204,57 @@ class ClientViewSet(viewsets.ModelViewSet):
     def statistics(self, request, pk=None):
         client = self.get_object()
         sales = client.sales.all()
+
+        stats_agg = sales.aggregate(
+            total_orders=Count('id'),
+            total_purchases=Sum('total'),
+        )
+
+        by_status = dict(
+            sales.values_list('status')
+            .annotate(count=Count('id'))
+            .values_list('status', 'count')
+        )
+
         stats = {
-            'total_orders': sales.count(),
-            'total_purchases': sales.aggregate(total=Sum('total'))['total'] or 0,
-            'orders_by_status': {},
-            'average_order_value': 0,
+            'total_orders': stats_agg['total_orders'] or 0,
+            'total_purchases': stats_agg['total_purchases'] or 0,
+            'orders_by_status': by_status,
+            'average_order_value': (
+                (stats_agg['total_purchases'] or 0) / stats_agg['total_orders']
+                if stats_agg['total_orders'] else 0
+            ),
         }
-        for status_choice in Vente.STATUS_CHOICES:
-            status_code = status_choice[0]
-            count = sales.filter(status=status_code).count()
-            if count > 0:
-                stats['orders_by_status'][status_code] = count
-        if stats['total_orders'] > 0:
-            stats['average_order_value'] = stats['total_purchases'] / \
-                stats['total_orders']
         return Response(stats)
 
-    # ============================================================
-    # Récupérer les factures impayées d'un client
-    # ============================================================
     @action(detail=True, methods=['get'], url_path='unpaid-invoices')
     def unpaid_invoices(self, request, pk=None):
-        """
-        Récupère les factures impayées d'un client
-        GET /clients/{id}/unpaid-invoices/
-        """
         client = self.get_object()
         unpaid_statuses = ['sent', 'overdue', 'partial']
 
-        factures = Facture.objects.filter(
-            client=client,
-            status__in=unpaid_statuses
-        ).order_by('due_date')
-
-        # Filtrer celles qui ont un reste à payer
-        factures_impayees = [
-            f for f in factures if f.remaining_amount > 0
-        ]
-
-        serializer = FactureSerializer(
-            factures_impayees,
-            many=True,
-            context={'request': request}
+        factures = (
+            Facture.objects
+            .select_related('client', 'sale')
+            .annotate(
+                remaining_calc=ExpressionWrapper(
+                    F('total') - F('amount_paid'),
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
+                )
+            )
+            .filter(
+                client=client,
+                status__in=unpaid_statuses,
+                remaining_calc__gt=0
+            )
+            .order_by('due_date')
         )
 
+        serializer = FactureSerializer(
+            factures, many=True, context={'request': request})
         return Response(serializer.data)
 
-    # ============================================================
-    # ✅ NOUVEAU : Récupérer le wallet d'un client
-    # ============================================================
     @action(detail=True, methods=['get'], url_path='wallet')
     def get_client_wallet(self, request, pk=None):
-        """
-        Récupère le wallet d'un client spécifique
-        GET /clients/{id}/wallet/
-        """
         client = self.get_object()
         wallet, created = ClientWallet.objects.get_or_create(client=client)
         serializer = ClientWalletSerializer(wallet)
@@ -312,6 +267,7 @@ class ClientViewSet(viewsets.ModelViewSet):
 class DevisViewSet(viewsets.ModelViewSet):
     queryset = Devis.objects.all()
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = OptimizedPagination
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -328,7 +284,11 @@ class DevisViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = (
+            Devis.objects
+            .select_related('client', 'warehouse', 'created_by')
+            .order_by('-devis_date', '-id')
+        )
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -339,9 +299,9 @@ class DevisViewSet(viewsets.ModelViewSet):
         client = self.request.query_params.get('client')
         if client:
             queryset = queryset.filter(client_id=client)
-        status = self.request.query_params.get('status')
-        if status:
-            queryset = queryset.filter(status=status)
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
         date_from = self.request.query_params.get('date_from')
         if date_from:
             queryset = queryset.filter(devis_date__date__gte=date_from)
@@ -388,7 +348,7 @@ class DevisViewSet(viewsets.ModelViewSet):
             )
         if not devis.warehouse:
             return Response(
-                {"error": "L'entrepôt doit être défini pour convertir le devis en vente"},
+                {"error": "L'entrepôt doit être défini"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         try:
@@ -422,12 +382,24 @@ class DevisViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# VENTE VIEWSET - COMPLET CORRIGÉ
+# VENTE VIEWSET - OPTIMISÉ
 # ============================================================
+# apps/ventes_clients/views.py
+
+# apps/ventes_clients/views.py
+# apps/ventes_clients/views.py
+
 class VenteViewSet(viewsets.ModelViewSet):
+    """
+    ✅ ViewSet optimisé pour gérer 10 000+ ventes.
+    """
     queryset = Vente.objects.all()
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = VentePagination
 
+    # ================================================================
+    # SERIALIZERS
+    # ================================================================
     def get_serializer_class(self):
         if self.action == 'list':
             return VenteListSerializer
@@ -442,8 +414,22 @@ class VenteViewSet(viewsets.ModelViewSet):
         context['request'] = self.request
         return context
 
+    # ================================================================
+    # QUERYSET OPTIMISÉ (pour sérialisation UNIQUEMENT)
+    # ================================================================
     def get_queryset(self):
-        queryset = super().get_queryset()
+        """✅ Queryset ENRICHI (select_related + annotate)."""
+        queryset = (
+            Vente.objects
+            .select_related('client', 'warehouse', 'created_by')
+            .annotate(
+                has_invoice_annotated=Exists(
+                    Facture.objects.filter(sale=OuterRef('pk'))
+                )
+            )
+            .order_by('-sale_date', '-id')
+        )
+
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -452,44 +438,104 @@ class VenteViewSet(viewsets.ModelViewSet):
                 Q(client_name__icontains=search) |
                 Q(order_number__icontains=search)
             )
+
         client = self.request.query_params.get('client')
         if client:
             queryset = queryset.filter(client_id=client)
+
         status_filter = self.request.query_params.get('status')
         if status_filter:
             status_list = status_filter.split(',')
             queryset = queryset.filter(status__in=status_list)
+
         payment_status = self.request.query_params.get('payment_status')
         if payment_status:
             queryset = queryset.filter(payment_status=payment_status)
+
         date_from = self.request.query_params.get('date_from')
         if date_from:
-            queryset = queryset.filter(sale_date__date__gte=date_from)
+            try:
+                date_start = dt.datetime.strptime(date_from, '%Y-%m-%d')
+                queryset = queryset.filter(sale_date__gte=date_start)
+            except ValueError:
+                pass
+
         date_to = self.request.query_params.get('date_to')
         if date_to:
-            queryset = queryset.filter(sale_date__date__lte=date_to)
+            try:
+                date_end = dt.datetime.strptime(date_to, '%Y-%m-%d')
+                date_end = date_end.replace(hour=23, minute=59, second=59)
+                queryset = queryset.filter(sale_date__lte=date_end)
+            except ValueError:
+                pass
+
         warehouse = self.request.query_params.get('warehouse')
         if warehouse:
             queryset = queryset.filter(warehouse_id=warehouse)
+
         min_total = self.request.query_params.get('min_total')
         if min_total:
             queryset = queryset.filter(total__gte=min_total)
+
         max_total = self.request.query_params.get('max_total')
         if max_total:
             queryset = queryset.filter(total__lte=max_total)
+
         return queryset
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
     # ================================================================
-    # 1. RÉCUPÉRER LES VENTES PAR DATE
+    # ✅ HELPER CRITIQUE : QUERYSET PROPRE POUR AGRÉGATIONS
+    # ================================================================
+    def _stats_queryset(self, date_start=None, date_end=None):
+        """
+        ✅ Queryset TOTALEMENT NEUF pour les agrégations.
+        - Repart de Vente.objects.all() (manager brut)
+        - AUCUN select_related / annotate
+        """
+        qs = Vente.objects.all()
+
+        if date_start:
+            qs = qs.filter(sale_date__gte=date_start)
+        if date_end:
+            qs = qs.filter(sale_date__lte=date_end)
+
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(invoice_number__icontains=search) |
+                Q(client__name__icontains=search) |
+                Q(client_name__icontains=search) |
+                Q(order_number__icontains=search)
+            )
+
+        client = self.request.query_params.get('client')
+        if client:
+            qs = qs.filter(client_id=client)
+
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            status_list = status_filter.split(',')
+            qs = qs.filter(status__in=status_list)
+
+        payment_status = self.request.query_params.get('payment_status')
+        if payment_status:
+            qs = qs.filter(payment_status=payment_status)
+
+        warehouse = self.request.query_params.get('warehouse')
+        if warehouse:
+            qs = qs.filter(warehouse_id=warehouse)
+
+        return qs
+
+    # ================================================================
+    # 1. VENTES PAR DATE (CORRIGÉ DÉFINITIVEMENT)
     # ================================================================
     @action(detail=False, methods=['get'], url_path='by-date')
     def get_by_date(self, request):
-        """
-        Récupère les ventes par date avec pagination et filtres
-        """
+        """✅ Récupère les ventes d'une date avec pagination serveur."""
         date_str = request.query_params.get('date')
         if date_str:
             try:
@@ -503,48 +549,69 @@ class VenteViewSet(viewsets.ModelViewSet):
             target_date = timezone.now().date()
 
         date_start = dt.datetime.combine(target_date, dt.datetime.min.time())
-        date_end = dt.datetime.combine(target_date, dt.datetime.max.time())
+        date_end = date_start + dt.timedelta(days=1)
 
-        queryset = self.get_queryset().filter(
-            sale_date__gte=date_start,
-            sale_date__lte=date_end
-        ).order_by('-sale_date')
-
-        status_filter = request.query_params.get('status')
-        if status_filter:
-            status_list = status_filter.split(',')
-            queryset = queryset.filter(status__in=status_list)
-
-        payment_status = request.query_params.get('payment_status')
-        if payment_status:
-            queryset = queryset.filter(payment_status=payment_status)
-
-        search = request.query_params.get('search')
-        if search:
-            queryset = queryset.filter(
-                Q(invoice_number__icontains=search) |
-                Q(client_name__icontains=search)
+        # ============================================================
+        # ✅ STATS via .values().annotate() — SANS CONFLIT DE NOMS
+        # ============================================================
+        try:
+            stats_qs = self._stats_queryset(
+                date_start=date_start,
+                date_end=date_end
             )
 
-        stats = {
-            'total': queryset.count(),
-            'total_amount': queryset.aggregate(total=Sum('total'))['total'] or 0,
-            'by_status': {
-                'draft': queryset.filter(status='draft').count(),
-                'confirmed': queryset.filter(status='confirmed').count(),
-                'paid': queryset.filter(status='paid').count(),
-                'delivered': queryset.filter(status='delivered').count(),
-                'cancelled': queryset.filter(status='cancelled').count(),
-                'returned': queryset.filter(status='returned').count(),
-            },
-            'by_payment_status': {
-                'pending': queryset.filter(payment_status='pending').count(),
-                'partial': queryset.filter(payment_status='partial').count(),
-                'paid': queryset.filter(payment_status='paid').count(),
-            }
-        }
+            # ✅ IMPORTANT : alias "count" (JAMAIS "total")
+            stats_result = stats_qs.values('status').annotate(
+                count=Count('id'),              # ✅ "count" au lieu de "total"
+                total_amount=Sum('total'),      # ✅ "total" = champ Vente.total
+            )
 
-        page = self.paginate_queryset(queryset)
+            total_count = 0
+            total_amount = Decimal('0')
+            by_status = {}
+
+            for row in stats_result:
+                status_val = row['status']
+                by_status[status_val] = row['count']        # ✅ row['count']
+                total_count += row['count']                  # ✅ row['count']
+                total_amount += row['total_amount'] or Decimal('0')
+
+            # ✅ GROUP BY payment_status
+            payment_result = stats_qs.values('payment_status').annotate(
+                count=Count('id')  # ✅ "count" au lieu de "total"
+            )
+            by_payment_status = {
+                row['payment_status']: row['count']
+                for row in payment_result
+            }
+
+            stats = {
+                'total': total_count,
+                'total_amount': total_amount,
+                'by_status': by_status,
+                'by_payment_status': by_payment_status,
+            }
+
+            logger.info(f"✅ Stats by-date : {total_count} ventes")
+
+        except Exception as e:
+            logger.exception("Erreur calcul stats by-date")
+            stats = {
+                'total': 0,
+                'total_amount': Decimal('0'),
+                'by_status': {},
+                'by_payment_status': {},
+            }
+
+        # ============================================================
+        # ✅ PAGINATION
+        # ============================================================
+        base_qs = self.get_queryset().filter(
+            sale_date__gte=date_start,
+            sale_date__lt=date_end
+        )
+
+        page = self.paginate_queryset(base_qs)
         if page is not None:
             serializer = VenteListSerializer(page, many=True)
             return self.get_paginated_response({
@@ -553,7 +620,7 @@ class VenteViewSet(viewsets.ModelViewSet):
                 'results': serializer.data
             })
 
-        serializer = VenteListSerializer(queryset, many=True)
+        serializer = VenteListSerializer(base_qs, many=True)
         return Response({
             'date': target_date.isoformat(),
             'stats': stats,
@@ -561,13 +628,11 @@ class VenteViewSet(viewsets.ModelViewSet):
         })
 
     # ================================================================
-    # 2. RÉCUPÉRER LES VENTES SUR UNE PLAGE DE DATES
+    # 2. VENTES PAR PLAGE DE DATES (CORRIGÉ DÉFINITIVEMENT)
     # ================================================================
     @action(detail=False, methods=['get'], url_path='date-range')
     def get_date_range(self, request):
-        """
-        Récupère les ventes sur une plage de dates
-        """
+        """✅ Récupère les ventes sur une plage avec pagination."""
         date_from = request.query_params.get('date_from')
         date_to = request.query_params.get('date_to')
 
@@ -586,35 +651,58 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        date_end = date_end.replace(hour=23, minute=59, second=59)
-
-        queryset = self.get_queryset().filter(
-            sale_date__gte=date_start,
-            sale_date__lte=date_end
-        ).order_by('-sale_date')
-
-        status_filter = request.query_params.get('status')
-        if status_filter:
-            status_list = status_filter.split(',')
-            queryset = queryset.filter(status__in=status_list)
-
-        payment_status = request.query_params.get('payment_status')
-        if payment_status:
-            queryset = queryset.filter(payment_status=payment_status)
-
-        search = request.query_params.get('search')
-        if search:
-            queryset = queryset.filter(
-                Q(invoice_number__icontains=search) |
-                Q(client_name__icontains=search)
+        if (date_end - date_start).days > 365:
+            return Response(
+                {"error": "La plage ne peut pas dépasser 365 jours"},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
-        stats = {
-            'total': queryset.count(),
-            'total_amount': queryset.aggregate(total=Sum('total'))['total'] or 0,
-        }
+        date_end = date_end.replace(hour=23, minute=59, second=59)
 
-        page = self.paginate_queryset(queryset)
+        # ============================================================
+        # ✅ STATS via .values().annotate() — SANS CONFLIT
+        # ============================================================
+        try:
+            stats_qs = self._stats_queryset(
+                date_start=date_start,
+                date_end=date_end
+            )
+
+            stats_result = stats_qs.values('status').annotate(
+                count=Count('id'),              # ✅ "count" (pas "total")
+                total_amount=Sum('total'),      # ✅ "total" = champ Vente.total
+            )
+
+            total_count = 0
+            total_amount = Decimal('0')
+
+            for row in stats_result:
+                total_count += row['count']
+                total_amount += row['total_amount'] or Decimal('0')
+
+            stats = {
+                'total': total_count,
+                'total_amount': total_amount,
+            }
+
+            logger.info(f"✅ Stats date-range : {total_count} ventes")
+
+        except Exception as e:
+            logger.exception("Erreur calcul stats date-range")
+            stats = {
+                'total': 0,
+                'total_amount': Decimal('0'),
+            }
+
+        # ============================================================
+        # ✅ PAGINATION
+        # ============================================================
+        base_qs = self.get_queryset().filter(
+            sale_date__gte=date_start,
+            sale_date__lte=date_end
+        )
+
+        page = self.paginate_queryset(base_qs)
         if page is not None:
             serializer = VenteListSerializer(page, many=True)
             return self.get_paginated_response({
@@ -624,7 +712,7 @@ class VenteViewSet(viewsets.ModelViewSet):
                 'results': serializer.data
             })
 
-        serializer = VenteListSerializer(queryset, many=True)
+        serializer = VenteListSerializer(base_qs, many=True)
         return Response({
             'date_from': date_from,
             'date_to': date_to,
@@ -637,13 +725,6 @@ class VenteViewSet(viewsets.ModelViewSet):
     # ================================================================
     @action(detail=True, methods=['post'])
     def confirm(self, request, pk=None):
-        """
-        Confirme une vente :
-        1. Vérifie le stock
-        2. Déduit le stock
-        3. Crée un mouvement de trésorerie (encaissement)
-        4. Génère la facture automatiquement
-        """
         vente = self.get_object()
 
         if vente.status != 'draft':
@@ -659,33 +740,38 @@ class VenteViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            # 1. Vérification du stock
-            stock_errors = []
-            for line in vente.lines.all():
-                stock = Stock.objects.filter(
-                    product=line.product,
+            lines = list(vente.lines.select_related('product').all())
+            stock_map = {
+                s.product_id: s
+                for s in Stock.objects.filter(
+                    product_id__in=[l.product_id for l in lines],
                     warehouse=vente.warehouse
-                ).first()
+                )
+            }
+
+            stock_errors = []
+            for line in lines:
+                stock = stock_map.get(line.product_id)
                 if not stock or stock.available_quantity < line.quantity:
+                    available = stock.available_quantity if stock else 0
                     stock_errors.append(
-                        f"{line.product.name}: disponible {stock.available_quantity if stock else 0}, demandé {line.quantity}"
+                        f"{line.product.name}: disponible {available}, demandé {line.quantity}"
                     )
+
             if stock_errors:
                 return Response({
                     "error": "Stock insuffisant pour les produits suivants:",
                     "details": stock_errors
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            # 2. Si pas de client, nom par défaut
             if not vente.client and not vente.client_name:
                 vente.client_name = "Client anonyme"
                 vente.save(update_fields=['client_name'])
 
-            # 3. Passer la vente en 'confirmed'
             vente.status = 'confirmed'
             vente.save()
 
-            # 4. CRÉATION DU MOUVEMENT DE TRÉSORERIE
+            # Mouvement trésorerie
             mouvement = None
             try:
                 from tresorerie.models import MouvementTresorerie, Caisse
@@ -717,31 +803,17 @@ class VenteViewSet(viewsets.ModelViewSet):
                             libelle=f"Vente {vente.invoice_number} - {vente.client_name}",
                             created_by=request.user
                         )
-
                         caisse.solde_actuel += vente.total
                         caisse.save(update_fields=[
                                     'solde_actuel', 'updated_at'])
-
-                        logger.info(
-                            f"✅ Mouvement d'encaissement créé pour la vente {vente.invoice_number}")
-                        logger.info(
-                            f"💰 Caisse {caisse.nom} augmentée de {vente.total:,.0f} FCFA")
-                    else:
-                        logger.warning(
-                            f"Aucune caisse par défaut pour l'entrepôt {vente.warehouse}")
                 else:
-                    logger.info(
-                        f"Mouvement déjà existant pour la vente {vente.invoice_number}")
                     mouvement = existing_movement
-
             except ImportError:
                 logger.warning("Module tresorerie non disponible")
             except Exception as e:
                 logger.error(f"Erreur création mouvement trésorerie: {e}")
 
-            # 5. Génération de la facture
-            from .models import Facture
-
+            # Génération facture
             facture = Facture.objects.filter(sale=vente).first()
             if not facture:
                 last_facture = Facture.objects.order_by('-id').first()
@@ -764,12 +836,11 @@ class VenteViewSet(viewsets.ModelViewSet):
                     tax_amount=vente.tax_amount,
                     total=vente.total,
                     status='sent',
-                    notes=f"Facture générée automatiquement depuis la vente {vente.invoice_number}"
+                    notes=f"Facture auto depuis vente {vente.invoice_number}"
                 )
                 facture.generate_qr_code()
                 facture.save()
 
-            # 6. Mise à jour du statut de paiement
             vente.amount_due = vente.total - vente.amount_paid
             if vente.amount_due <= 0:
                 vente.payment_status = 'paid'
@@ -793,26 +864,18 @@ class VenteViewSet(viewsets.ModelViewSet):
         except Exception as e:
             vente.status = 'draft'
             vente.save(update_fields=['status', 'updated_at'])
-            logger.exception("Erreur lors de la confirmation de la vente")
+            logger.exception("Erreur lors de la confirmation")
             return Response(
                 {"error": f"Erreur lors de la confirmation: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
     # ================================================================
-    # 4. ENREGISTRER UN PAIEMENT SUR UNE VENTE
+    # 4. ENREGISTRER UN PAIEMENT
     # ================================================================
     @action(detail=True, methods=['post'])
     def register_payment(self, request, pk=None):
-        """
-        Enregistre un paiement sur une vente
-        """
-        from decimal import Decimal
-        from django.db import transaction
-        from django.db.models import Sum
-
         vente = self.get_object()
-        logger.info(f"🔔 register_payment - vente {vente.invoice_number}")
 
         amount = request.data.get('amount')
         method = request.data.get('method', 'cash')
@@ -860,11 +923,9 @@ class VenteViewSet(viewsets.ModelViewSet):
                 caisse_destination_id=caisse_destination_id,
                 compte_destination_id=compte_destination_id
             )
-            logger.info(f"✅ Paiement créé : ID {paiement.id}")
 
             total_paid_facture = facture.paiements.aggregate(
-                total=Sum('amount')
-            )['total'] or Decimal('0')
+                total=Sum('amount'))['total'] or Decimal('0')
             facture.amount_paid = total_paid_facture
             if facture.amount_paid >= facture.total:
                 facture.status = 'paid'
@@ -883,94 +944,20 @@ class VenteViewSet(viewsets.ModelViewSet):
                 vente.payment_status = 'pending'
             vente.save()
 
-            # CRÉER LE MOUVEMENT DE TRÉSORERIE
-            try:
-                from tresorerie.models import MouvementTresorerie, Caisse, CompteBancaire
-
-                caisse = None
-                compte = None
-
-                if caisse_destination_id:
-                    try:
-                        caisse = Caisse.objects.get(id=caisse_destination_id)
-                    except Caisse.DoesNotExist:
-                        pass
-
-                if compte_destination_id:
-                    try:
-                        compte = CompteBancaire.objects.get(
-                            id=compte_destination_id)
-                    except CompteBancaire.DoesNotExist:
-                        pass
-
-                if not caisse and not compte:
-                    caisse = Caisse.objects.filter(
-                        warehouse=vente.warehouse,
-                        is_default=True
-                    ).first()
-
-                if caisse or compte:
-                    existing_movement = MouvementTresorerie.objects.filter(
-                        source_type='paiement_client',
-                        source_id=paiement.id
-                    ).first()
-
-                    if not existing_movement:
-                        mouvement = MouvementTresorerie.objects.create(
-                            type_mouvement='encaissement',
-                            warehouse=vente.warehouse,
-                            source_type='paiement_client',
-                            source_id=paiement.id,
-                            source_reference=paiement.reference or f"PAY-{paiement.id}",
-                            montant=paiement.amount,
-                            mode_paiement=paiement.method,
-                            caisse=caisse,
-                            compte_bancaire=compte,
-                            date_mouvement=paiement.payment_date,
-                            date_valeur=paiement.payment_date.date(),
-                            status='effectue',
-                            libelle=f"Paiement vente {vente.invoice_number} - {vente.client_name}",
-                            created_by=request.user
-                        )
-
-                        if caisse:
-                            caisse.solde_actuel += paiement.amount
-                            caisse.save(update_fields=[
-                                        'solde_actuel', 'updated_at'])
-                            logger.info(
-                                f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
-
-                        if compte:
-                            compte.solde_actuel += paiement.amount
-                            compte.save(update_fields=[
-                                        'solde_actuel', 'updated_at'])
-                            logger.info(
-                                f"💰 Compte {compte.nom} augmenté de {paiement.amount:,.0f} FCFA")
-
-                        logger.info(
-                            f"✅ Mouvement d'encaissement créé pour le paiement {paiement.id}")
-                    else:
-                        logger.info(
-                            f"Mouvement déjà existant pour le paiement {paiement.id}")
-                else:
-                    logger.warning(
-                        f"Aucune destination pour le paiement {paiement.id}")
-
-            except ImportError:
-                logger.warning("Module tresorerie non disponible")
-            except Exception as e:
-                logger.error(f"Erreur création mouvement: {e}")
+            mouvement = creer_mouvement_paiement_manuel(
+                paiement, facture, request.user)
 
         return Response({
             'status': 'success',
             'message': 'Paiement enregistré avec succès',
             'amount_paid': vente.amount_paid,
             'amount_due': vente.amount_due,
-            'payment_status': vente.payment_status
+            'payment_status': vente.payment_status,
+            'mouvement_cree': mouvement is not None
         }, status=status.HTTP_201_CREATED)
 
     # ================================================================
-    # 5. MISE À JOUR DU STATUT
+    # 5. METTRE À JOUR LE STATUT
     # ================================================================
     @action(detail=True, methods=['post'])
     def update_status(self, request, pk=None):
@@ -1012,7 +999,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             })
         except Exception as e:
             return Response(
-                {"error": f"Erreur lors du changement de statut: {str(e)}"},
+                {"error": f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1021,19 +1008,11 @@ class VenteViewSet(viewsets.ModelViewSet):
     # ================================================================
     @action(detail=True, methods=['post'])
     def mark_paid(self, request, pk=None):
-        """
-        Marque la vente comme payée en créant automatiquement un paiement
-        pour le montant restant dû.
-        """
-        from decimal import Decimal
-        from django.db import transaction
-        from django.db.models import Sum
-
         vente = self.get_object()
 
         if vente.status not in ['confirmed', 'delivered']:
             return Response(
-                {"error": "Seule une vente confirmée ou livrée peut être marquée comme payée."},
+                {"error": "Seule une vente confirmée ou livrée peut être marquée payée."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1049,7 +1028,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             facture = vente.generate_invoice()
             if not facture:
                 return Response(
-                    {"error": "Impossible de générer une facture pour cette vente."},
+                    {"error": "Impossible de générer une facture."},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
@@ -1059,14 +1038,12 @@ class VenteViewSet(viewsets.ModelViewSet):
                 amount=amount_due,
                 method='cash',
                 reference='',
-                notes='Paiement automatique (marquer comme payé)',
+                notes='Paiement automatique',
                 received_by=request.user
             )
-            logger.info(f"✅ Paiement automatique créé : ID {paiement.id}")
 
             total_paid_facture = facture.paiements.aggregate(
-                total=Sum('amount')
-            )['total'] or Decimal('0')
+                total=Sum('amount'))['total'] or Decimal('0')
             facture.amount_paid = total_paid_facture
             facture.status = 'paid' if total_paid_facture >= facture.total else 'partial'
             facture.save()
@@ -1076,64 +1053,10 @@ class VenteViewSet(viewsets.ModelViewSet):
             if vente.amount_due <= 0:
                 vente.payment_status = 'paid'
                 vente.status = 'paid'
-            elif vente.amount_paid > 0:
-                vente.payment_status = 'partial'
-            else:
-                vente.payment_status = 'pending'
             vente.save()
 
-            # Créer le mouvement de trésorerie
-            try:
-                from tresorerie.models import MouvementTresorerie, Caisse
-
-                caisse = Caisse.objects.filter(
-                    warehouse=vente.warehouse,
-                    is_default=True
-                ).first()
-
-                if not caisse:
-                    caisse = Caisse.objects.filter(
-                        warehouse=vente.warehouse,
-                        is_active=True
-                    ).first()
-
-                if caisse:
-                    mouvement_existant = MouvementTresorerie.objects.filter(
-                        source_type='paiement_client',
-                        source_id=paiement.id
-                    ).first()
-                    if not mouvement_existant:
-                        mouvement = MouvementTresorerie.objects.create(
-                            type_mouvement='encaissement',
-                            warehouse=vente.warehouse,
-                            source_type='paiement_client',
-                            source_id=paiement.id,
-                            source_reference=paiement.reference or f"PAY-{paiement.id}",
-                            montant=paiement.amount,
-                            mode_paiement=paiement.method,
-                            caisse=caisse,
-                            compte_bancaire=None,
-                            date_mouvement=paiement.payment_date,
-                            date_valeur=paiement.payment_date.date(),
-                            status='effectue',
-                            libelle=f"Paiement vente {vente.invoice_number} - {vente.client_name}",
-                            created_by=request.user
-                        )
-                        caisse.solde_actuel += paiement.amount
-                        caisse.save(update_fields=[
-                                    'solde_actuel', 'updated_at'])
-                        logger.info(
-                            f"💰 Caisse {caisse.nom} augmentée de {paiement.amount:,.0f} FCFA")
-                    else:
-                        logger.info(
-                            f"Mouvement déjà existant pour le paiement {paiement.id}")
-                else:
-                    logger.warning("Aucune caisse trouvée pour l'entrepôt.")
-            except ImportError:
-                logger.warning("Module tresorerie non disponible")
-            except Exception as e:
-                logger.error(
-                    f"Erreur lors de la création du mouvement trésorerie : {e}")
+            mouvement = creer_mouvement_paiement_manuel(
+                paiement, facture, request.user)
 
         return Response({
             'status': 'success',
@@ -1141,9 +1064,9 @@ class VenteViewSet(viewsets.ModelViewSet):
             'amount_paid': vente.amount_paid,
             'amount_due': vente.amount_due,
             'payment_status': vente.payment_status,
-            'facture_status': facture.status,
-            'invoice_number': vente.invoice_number
-        }, status=status.HTTP_200_OK)
+            'invoice_number': vente.invoice_number,
+            'mouvement_cree': mouvement is not None
+        })
 
     # ================================================================
     # 7. ANNULER UNE VENTE
@@ -1154,7 +1077,7 @@ class VenteViewSet(viewsets.ModelViewSet):
 
         if vente.status in ['paid', 'delivered']:
             return Response(
-                {"error": "Cette vente ne peut pas être annulée car elle est déjà payée ou livrée"},
+                {"error": "Cette vente ne peut pas être annulée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1171,14 +1094,10 @@ class VenteViewSet(viewsets.ModelViewSet):
                 'status': vente.status,
                 'old_status': old_status,
                 'message': 'Vente annulée avec succès',
-                'stock_restored': old_status == 'confirmed',
-                'invoice_number': vente.invoice_number
+                'stock_restored': old_status == 'confirmed'
             })
         except Exception as e:
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     # ================================================================
     # 8. MARQUER COMME LIVRÉ
@@ -1189,7 +1108,7 @@ class VenteViewSet(viewsets.ModelViewSet):
 
         if vente.status != 'confirmed':
             return Response(
-                {"error": "Seule une vente confirmée peut être marquée comme livrée"},
+                {"error": "Seule une vente confirmée peut être livrée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1204,8 +1123,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             'status': vente.status,
             'delivery_status': vente.delivery_status,
             'delivery_date': vente.delivery_date,
-            'message': 'Vente marquée comme livrée',
-            'invoice_number': vente.invoice_number
+            'message': 'Vente marquée comme livrée'
         })
 
     # ================================================================
@@ -1225,18 +1143,13 @@ class VenteViewSet(viewsets.ModelViewSet):
             vente.restore_stock()
             vente.status = 'returned'
             vente.save()
-
             return Response({
                 'status': vente.status,
                 'message': 'Vente retournée avec succès',
-                'stock_restored': True,
-                'invoice_number': vente.invoice_number
+                'stock_restored': True
             })
         except Exception as e:
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     # ================================================================
     # 10. RÉCUPÉRER LES PAIEMENTS
@@ -1249,8 +1162,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             for paiement in facture.paiements.all():
                 payments.append(paiement)
         serializer = PaiementSerializer(
-            payments, many=True, context={'request': request}
-        )
+            payments, many=True, context={'request': request})
         return Response(serializer.data)
 
     # ================================================================
@@ -1261,8 +1173,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         vente = self.get_object()
         factures = vente.invoices.all()
         serializer = FactureSerializer(
-            factures, many=True, context={'request': request}
-        )
+            factures, many=True, context={'request': request})
         return Response(serializer.data)
 
     # ================================================================
@@ -1300,60 +1211,83 @@ class VenteViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     # ================================================================
-    # 14. STATISTIQUES
+    # 14. STATISTIQUES (CORRIGÉ DÉFINITIVEMENT)
     # ================================================================
     @action(detail=False, methods=['get'])
     def stats(self, request):
-        days = int(request.query_params.get('days', 30))
+        """✅ Statistiques via .values().annotate() — sans conflit de noms."""
+        try:
+            days = int(request.query_params.get('days', 30))
+        except (TypeError, ValueError):
+            days = 30
+
         start_date = timezone.now() - timedelta(days=days)
-        ventes = Vente.objects.filter(sale_date__gte=start_date)
 
-        total_ventes = ventes.count()
-        total_montant = ventes.aggregate(total=Sum('total'))['total'] or 0
-        total_paye = ventes.aggregate(total=Sum('amount_paid'))['total'] or 0
-        total_due = total_montant - total_paye
+        try:
+            ventes = self._stats_queryset(date_start=start_date)
 
-        by_status = {}
-        for status_choice in Vente.STATUS_CHOICES:
-            status_code = status_choice[0]
-            count = ventes.filter(status=status_code).count()
-            if count > 0:
-                by_status[status_code] = count
+            # ✅ Alias "count" au lieu de "total"
+            stats_result = ventes.values('status').annotate(
+                count=Count('id'),              # ✅ "count"
+                total_montant=Sum('total'),     # ✅ "total" = champ
+                total_paye=Sum('amount_paid'),
+            )
 
-        by_payment_status = {}
-        for status_choice in Vente.PAYMENT_STATUS_CHOICES:
-            status_code = status_choice[0]
-            count = ventes.filter(payment_status=status_code).count()
-            if count > 0:
-                by_payment_status[status_code] = count
+            total_ventes = 0
+            total_montant = Decimal('0')
+            total_paye = Decimal('0')
+            by_status = {}
 
-        avg_amount = total_montant / total_ventes if total_ventes > 0 else 0
+            for row in stats_result:
+                status_val = row['status']
+                by_status[status_val] = row['count']          # ✅ row['count']
+                total_ventes += row['count']                   # ✅ row['count']
+                total_montant += row['total_montant'] or Decimal('0')
+                total_paye += row['total_paye'] or Decimal('0')
 
-        return Response({
-            'period': {
-                'days': days,
-                'start_date': start_date.strftime('%Y-%m-%d'),
-                'end_date': timezone.now().strftime('%Y-%m-%d')
-            },
-            'total_ventes': total_ventes,
-            'total_montant': total_montant,
-            'total_paye': total_paye,
-            'total_due': total_due,
-            'avg_amount': avg_amount,
-            'by_status': by_status,
-            'by_payment_status': by_payment_status
-        })
+            total_due = total_montant - total_paye
+
+            # ✅ Alias "count" au lieu de "total"
+            payment_result = ventes.values('payment_status').annotate(
+                count=Count('id')  # ✅ "count"
+            )
+            by_payment_status = {
+                row['payment_status']: row['count']
+                for row in payment_result
+            }
+
+            avg_amount = (
+                total_montant / total_ventes
+                if total_ventes > 0 else Decimal('0')
+            )
+
+            return Response({
+                'period': {
+                    'days': days,
+                    'start_date': start_date.strftime('%Y-%m-%d'),
+                    'end_date': timezone.now().strftime('%Y-%m-%d')
+                },
+                'total_ventes': total_ventes,
+                'total_montant': total_montant,
+                'total_paye': total_paye,
+                'total_due': total_due,
+                'avg_amount': avg_amount,
+                'by_status': by_status,
+                'by_payment_status': by_payment_status
+            })
+        except Exception as e:
+            logger.exception("Erreur stats")
+            return Response(
+                {"error": f"Erreur: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
-# ============================================================
-# FACTURE VIEWSET
-# ============================================================
-# ============================================================
-# FACTURE VIEWSET - COMPLET AVEC RECHERCHE OPTIMISÉE
-# ============================================================
 class FactureViewSet(viewsets.ModelViewSet):
+    """✅ ViewSet optimisé pour les factures."""
     queryset = Facture.objects.all()
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = OptimizedPagination
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -1366,20 +1300,35 @@ class FactureViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset().select_related('client', 'sale')
+        """✅ Queryset optimisé avec annotations SQL."""
+        queryset = (
+            Facture.objects
+            .select_related('client', 'sale', 'sale__warehouse')
+            .annotate(
+                remaining_calc=ExpressionWrapper(
+                    F('total') - F('amount_paid'),
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
+                )
+            )
+        )
+
         client = self.request.query_params.get('client')
         if client:
             queryset = queryset.filter(client_id=client)
-        status = self.request.query_params.get('status')
-        if status:
-            status_list = status.split(',')
+
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            status_list = status_filter.split(',')
             queryset = queryset.filter(status__in=status_list)
+
         date_from = self.request.query_params.get('date_from')
         if date_from:
             queryset = queryset.filter(invoice_date__gte=date_from)
+
         date_to = self.request.query_params.get('date_to')
         if date_to:
             queryset = queryset.filter(invoice_date__lte=date_to)
+
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -1387,24 +1336,16 @@ class FactureViewSet(viewsets.ModelViewSet):
                 Q(client__name__icontains=search) |
                 Q(client__code__icontains=search)
             )
-        return queryset
 
-    # ================================================================
-    # ✅ RECHERCHE OPTIMISÉE POUR LE FORMULAIRE DE PAIEMENT
-    # ================================================================
+        unpaid_only = self.request.query_params.get('unpaid_only')
+        if unpaid_only == 'true':
+            queryset = queryset.filter(remaining_calc__gt=0)
+
+        return queryset.order_by('-invoice_date', '-id')
+
     @action(detail=False, methods=['get'], url_path='search-unpaid')
     def search_unpaid(self, request):
-        """
-        Recherche paginée de factures impayées pour le formulaire de paiement.
-
-        GET /factures/search-unpaid/?q=client&client_id=1&limit=20
-
-        Paramètres :
-        - q          : recherche texte (n° facture, nom client, code client, téléphone)
-        - client_id  : filtrer par client spécifique
-        - limit      : nombre max de résultats (défaut 20, max 50)
-        - status     : statuts à inclure (défaut: sent,overdue,partial)
-        """
+        """✅ Recherche de factures impayées 100% SQL (rapide)."""
         query = request.query_params.get('q', '').strip()
         client_id = request.query_params.get('client_id')
         try:
@@ -1416,16 +1357,21 @@ class FactureViewSet(viewsets.ModelViewSet):
             'status', 'sent,overdue,partial')
         statuses = [s.strip() for s in status_param.split(',') if s.strip()]
 
-        # Base : factures non payées
-        qs = Facture.objects.select_related('client', 'sale').filter(
-            status__in=statuses
-        ).exclude(status='paid').order_by('due_date')
+        qs = (
+            Facture.objects
+            .select_related('client', 'sale')
+            .annotate(
+                remaining_calc=ExpressionWrapper(
+                    F('total') - F('amount_paid'),
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
+                )
+            )
+            .filter(status__in=statuses, remaining_calc__gt=0)
+        )
 
-        # Filtre par client spécifique
         if client_id:
             qs = qs.filter(client_id=client_id)
 
-        # Recherche texte
         if query:
             qs = qs.filter(
                 Q(invoice_number__icontains=query) |
@@ -1434,27 +1380,18 @@ class FactureViewSet(viewsets.ModelViewSet):
                 Q(client__phone__icontains=query)
             )
 
-        # Filtrer uniquement celles avec un reste à payer > 0
-        factures = [f for f in qs if f.remaining_amount > 0][:limit]
+        qs = qs.order_by('due_date')[:limit]
 
         serializer = FactureSerializer(
-            factures, many=True, context={'request': request}
-        )
+            qs, many=True, context={'request': request})
 
         return Response({
-            'count': len(factures),
+            'count': len(serializer.data),
             'results': serializer.data
         })
 
-    # ================================================================
-    # ✅ Récupérer les factures impayées d'un client (ancien endpoint)
-    # ================================================================
     @action(detail=False, methods=['get'], url_path='unpaid')
     def unpaid_invoices(self, request):
-        """
-        Récupère les factures impayées d'un client
-        GET /factures/unpaid/?client_id=1
-        """
         client_id = request.query_params.get('client_id')
         if not client_id:
             return Response(
@@ -1464,32 +1401,29 @@ class FactureViewSet(viewsets.ModelViewSet):
 
         unpaid_statuses = ['sent', 'overdue', 'partial']
 
-        factures = Facture.objects.filter(
-            client_id=client_id,
-            status__in=unpaid_statuses
-        ).order_by('due_date')
-
-        factures_impayees = [
-            f for f in factures if f.remaining_amount > 0
-        ]
-
-        serializer = FactureSerializer(
-            factures_impayees,
-            many=True,
-            context={'request': request}
+        qs = (
+            Facture.objects
+            .select_related('client', 'sale')
+            .annotate(
+                remaining_calc=ExpressionWrapper(
+                    F('total') - F('amount_paid'),
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
+                )
+            )
+            .filter(
+                client_id=client_id,
+                status__in=unpaid_statuses,
+                remaining_calc__gt=0
+            )
+            .order_by('due_date')
         )
 
+        serializer = FactureSerializer(
+            qs, many=True, context={'request': request})
         return Response(serializer.data)
 
-    # ================================================================
-    # ✅ Récupérer les stats de factures d'un client (pour dashboard)
-    # ================================================================
     @action(detail=False, methods=['get'], url_path='client-stats')
     def client_stats(self, request):
-        """
-        Statistiques de facturation pour un client.
-        GET /factures/client-stats/?client_id=1
-        """
         client_id = request.query_params.get('client_id')
         if not client_id:
             return Response(
@@ -1499,19 +1433,22 @@ class FactureViewSet(viewsets.ModelViewSet):
 
         factures = Facture.objects.filter(client_id=client_id)
 
-        total_factures = factures.count()
-        total_montant = factures.aggregate(
-            total=Sum('total'))['total'] or Decimal('0')
-        total_paye = factures.aggregate(
-            total=Sum('amount_paid'))['total'] or Decimal('0')
+        stats_agg = factures.aggregate(
+            total_factures=Count('id'),
+            total_montant=Sum('total'),
+            total_paye=Sum('amount_paid'),
+        )
+
+        total_factures = stats_agg['total_factures'] or 0
+        total_montant = stats_agg['total_montant'] or Decimal('0')
+        total_paye = stats_agg['total_paye'] or Decimal('0')
         total_impaye = total_montant - total_paye
 
-        par_statut = {}
-        for status_choice in Facture.STATUS_CHOICES:
-            status_code = status_choice[0]
-            count = factures.filter(status=status_code).count()
-            if count > 0:
-                par_statut[status_code] = count
+        par_statut = dict(
+            factures.values_list('status')
+            .annotate(count=Count('id'))
+            .values_list('status', 'count')
+        )
 
         return Response({
             'total_factures': total_factures,
@@ -1521,17 +1458,9 @@ class FactureViewSet(viewsets.ModelViewSet):
             'par_statut': par_statut,
         })
 
-    # ================================================================
-    # ENREGISTRER UN PAIEMENT SUR UNE FACTURE
-    # ================================================================
     @action(detail=True, methods=['post'])
     def register_payment(self, request, pk=None):
-        from decimal import Decimal
-        from django.db import transaction
-        from django.db.models import Sum
-
         facture = self.get_object()
-        logger.info(f"🔔 register_payment - facture {facture.invoice_number}")
 
         amount = request.data.get('amount')
         method = request.data.get('method', 'cash')
@@ -1559,7 +1488,6 @@ class FactureViewSet(viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
-            # 1. Création du paiement
             paiement = Paiement.objects.create(
                 facture=facture,
                 amount=amount,
@@ -1568,9 +1496,7 @@ class FactureViewSet(viewsets.ModelViewSet):
                 notes=notes or f"Paiement sur la facture {facture.invoice_number}",
                 received_by=request.user
             )
-            logger.info(f"✅ Paiement créé : ID {paiement.id}")
 
-            # 2. Mise à jour de la facture
             total_paid = facture.paiements.aggregate(total=Sum('amount'))[
                 'total'] or Decimal('0')
             facture.amount_paid = total_paid
@@ -1580,12 +1506,10 @@ class FactureViewSet(viewsets.ModelViewSet):
                 facture.status = 'partial'
             facture.save()
 
-            # 3. Mise à jour de la vente associée
             sale = facture.sale
             if sale:
-                total_paid_sale = Decimal('0')
-                for inv in sale.invoices.all():
-                    total_paid_sale += inv.amount_paid
+                total_paid_sale = sum(
+                    inv.amount_paid for inv in sale.invoices.all())
                 sale.amount_paid = total_paid_sale
                 sale.amount_due = sale.total - sale.amount_paid
                 if sale.amount_due <= 0:
@@ -1595,40 +1519,21 @@ class FactureViewSet(viewsets.ModelViewSet):
                 else:
                     sale.payment_status = 'pending'
                 sale.save()
-                logger.info(
-                    f"   Vente associée : {sale.invoice_number}, warehouse={sale.warehouse}")
 
-            # 4. ✨ CRÉATION MANUELLE DU MOUVEMENT DE TRÉSORERIE
             mouvement = creer_mouvement_paiement_manuel(
                 paiement, facture, request.user)
 
-            if mouvement:
-                logger.info(f"✅ Mouvement créé : {mouvement.reference}")
-            else:
-                logger.warning(
-                    "⚠️ Aucun mouvement créé pour ce paiement (vérifiez les logs)")
-
-        # 5. Réponse
         serializer = PaiementSerializer(paiement, context={'request': request})
         return Response({
             'paiement': serializer.data,
             'facture': FactureSerializer(facture, context={'request': request}).data,
             'remaining_amount': facture.remaining_amount,
             'mouvement_cree': mouvement is not None,
-            'mouvement_reference': mouvement.reference if mouvement else None
         }, status=status.HTTP_201_CREATED)
 
-    # ================================================================
-    # MARQUER COMME PAYÉE (avec montant optionnel)
-    # ================================================================
     @action(detail=True, methods=['post'])
     def mark_paid(self, request, pk=None):
-        from decimal import Decimal
-        from django.db import transaction
-        from django.db.models import Sum
-
         facture = self.get_object()
-        logger.info(f"🔔 mark_paid - facture {facture.invoice_number}")
 
         amount = request.data.get('amount', 0)
         method = request.data.get('method', 'cash')
@@ -1643,15 +1548,9 @@ class FactureViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if amount <= 0:
+        if amount <= 0 or amount > facture.remaining_amount:
             return Response(
-                {"error": "Le montant doit être supérieur à 0"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if amount > facture.remaining_amount:
-            return Response(
-                {"error": f"Le montant dépasse le solde restant ({facture.remaining_amount:,.0f} FCFA)"},
+                {"error": f"Montant invalide (restant: {facture.remaining_amount:,.0f} FCFA)"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1664,7 +1563,6 @@ class FactureViewSet(viewsets.ModelViewSet):
                 notes=notes or f"Paiement sur la facture {facture.invoice_number}",
                 received_by=request.user
             )
-            logger.info(f"✅ Paiement créé : ID {paiement.id}")
 
             total_paid = facture.paiements.aggregate(total=Sum('amount'))[
                 'total'] or Decimal('0')
@@ -1677,9 +1575,8 @@ class FactureViewSet(viewsets.ModelViewSet):
 
             sale = facture.sale
             if sale:
-                total_paid_sale = Decimal('0')
-                for inv in sale.invoices.all():
-                    total_paid_sale += inv.amount_paid
+                total_paid_sale = sum(
+                    inv.amount_paid for inv in sale.invoices.all())
                 sale.amount_paid = total_paid_sale
                 sale.amount_due = sale.total - sale.amount_paid
                 if sale.amount_due <= 0:
@@ -1690,22 +1587,16 @@ class FactureViewSet(viewsets.ModelViewSet):
                     sale.payment_status = 'pending'
                 sale.save()
 
-            # ✨ Création manuelle du mouvement
             mouvement = creer_mouvement_paiement_manuel(
                 paiement, facture, request.user)
 
-        serializer = PaiementSerializer(paiement, context={'request': request})
         return Response({
-            'paiement': serializer.data,
+            'paiement': PaiementSerializer(paiement, context={'request': request}).data,
             'facture_status': facture.status,
             'remaining_amount': facture.remaining_amount,
             'mouvement_cree': mouvement is not None,
-            'mouvement_reference': mouvement.reference if mouvement else None
         }, status=status.HTTP_201_CREATED)
 
-    # ================================================================
-    # ENVOYER UNE FACTURE
-    # ================================================================
     @action(detail=True, methods=['post'])
     def send(self, request, pk=None):
         facture = self.get_object()
@@ -1723,9 +1614,6 @@ class FactureViewSet(viewsets.ModelViewSet):
             'message': 'Facture envoyée avec succès'
         })
 
-    # ================================================================
-    # ANNULER UNE FACTURE
-    # ================================================================
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         facture = self.get_object()
@@ -1741,12 +1629,8 @@ class FactureViewSet(viewsets.ModelViewSet):
             'message': 'Facture annulée avec succès'
         })
 
-    # ================================================================
-    # GÉNÉRER UNE FACTURE DEPUIS UNE VENTE
-    # ================================================================
     @action(detail=True, methods=['post'])
     def generate_invoice(self, request, pk=None):
-        from django.db import transaction
         sale_id = request.data.get('sale_id')
         due_date = request.data.get('due_date')
 
@@ -1775,7 +1659,7 @@ class FactureViewSet(viewsets.ModelViewSet):
                 due_date = date.fromisoformat(due_date)
             except ValueError:
                 return Response(
-                    {"error": "Format de date invalide. Utilisez YYYY-MM-DD"},
+                    {"error": "Format de date invalide"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         else:
@@ -1783,13 +1667,12 @@ class FactureViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             last_facture = Facture.objects.order_by('-id').first()
+            num = 1
             if last_facture and last_facture.invoice_number:
                 try:
                     num = int(last_facture.invoice_number.split('-')[-1]) + 1
                 except (ValueError, IndexError):
                     num = 1
-            else:
-                num = 1
             invoice_number = f"FAC-{date.today().year}-{num:04d}"
 
             facture = Facture.objects.create(
@@ -1811,9 +1694,6 @@ class FactureViewSet(viewsets.ModelViewSet):
             'message': 'Facture générée avec succès'
         }, status=status.HTTP_201_CREATED)
 
-    # ================================================================
-    # GÉNÉRER LE QR CODE
-    # ================================================================
     @action(detail=True, methods=['get'])
     def generate_qr(self, request, pk=None):
         facture = self.get_object()
@@ -1830,9 +1710,6 @@ class FactureViewSet(viewsets.ModelViewSet):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-    # ================================================================
-    # LISTER LES PAIEMENTS D'UNE FACTURE
-    # ================================================================
     @action(detail=True, methods=['get'])
     def paiements(self, request, pk=None):
         facture = self.get_object()
@@ -1841,15 +1718,15 @@ class FactureViewSet(viewsets.ModelViewSet):
             paiements, many=True, context={'request': request})
         return Response(serializer.data)
 
+
 # ============================================================
 # PAIEMENT VIEWSET
 # ============================================================
-
-
 class PaiementViewSet(viewsets.ModelViewSet):
     queryset = Paiement.objects.all()
     serializer_class = PaiementSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = OptimizedPagination
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -1860,12 +1737,8 @@ class PaiementViewSet(viewsets.ModelViewSet):
         queryset = (
             Paiement.objects
             .select_related(
-                'facture',
-                'facture__client',
-                'facture__sale',
-                'received_by',
-                'caisse_destination',
-                'compte_destination',
+                'facture', 'facture__client', 'facture__sale',
+                'received_by', 'caisse_destination', 'compte_destination',
             )
             .order_by('-payment_date')
         )
@@ -1894,21 +1767,16 @@ class PaiementViewSet(viewsets.ModelViewSet):
             )
         return queryset
 
+
 # ============================================================
 # AVOIR VIEWSET
 # ============================================================
-
-
-# ============================================================
-# AVOIR VIEWSET - CORRIGÉ AVEC RESTAURATION DU STOCK
-# ============================================================
-# apps/ventes_clients/views.py (extrait — AvoirViewSet complet)
-
 class AvoirViewSet(viewsets.ModelViewSet):
     queryset = Avoir.objects.prefetch_related(
         "lignes", "lignes__product", "client", "sale"
     ).all()
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = OptimizedPagination
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -1943,30 +1811,18 @@ class AvoirViewSet(viewsets.ModelViewSet):
 
         return queryset
 
-    # ============================================================
-    # CRÉATION AVEC RESTAURATION DU STOCK
-    # ============================================================
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        # Lire restore_stock (bool ou string)
         restore_stock = request.data.get("restore_stock", False)
         if isinstance(restore_stock, str):
             restore_stock = restore_stock.lower() == "true"
 
         try:
             with transaction.atomic():
-                # 1. CRÉER L'AVOIR + SES LIGNES
                 avoir = serializer.save(created_by=request.user)
 
-                logger.info(
-                    f"✅ Avoir créé : {avoir.avoir_number} "
-                    f"({avoir.type}) - {avoir.amount:,.0f} FCFA - "
-                    f"{avoir.lignes.count()} ligne(s)"
-                )
-
-                # 2. RESTAURER LE STOCK (PRODUITS RETOURNÉS UNIQUEMENT)
                 stock_restored = False
                 stock_details = []
 
@@ -1982,12 +1838,7 @@ class AvoirViewSet(viewsets.ModelViewSet):
                     stock_restored = result["success"]
                     stock_details = result["details"]
 
-                    if stock_restored:
-                        logger.info(f"📦 {result['message']}")
-                    else:
-                        logger.warning(f"⚠️ {result['message']}")
-
-                # 3. MOUVEMENT DE TRÉSORERIE (DÉCAISSEMENT)
+                # Mouvement trésorerie
                 mouvement_tresorerie = None
                 try:
                     from tresorerie.models import MouvementTresorerie, Caisse
@@ -2027,22 +1878,16 @@ class AvoirViewSet(viewsets.ModelViewSet):
                                     created_by=request.user,
                                 )
 
-                                # Diminuer la caisse
                                 caisse.solde_actuel -= avoir.amount
                                 caisse.save(update_fields=[
                                             "solde_actuel", "updated_at"])
-
-                                logger.info(
-                                    f"💰 Caisse {caisse.nom} : -{avoir.amount:,.0f} FCFA"
-                                )
                             else:
                                 mouvement_tresorerie = existing
                 except ImportError:
-                    logger.warning("Module tresorerie non disponible")
+                    pass
                 except Exception as e:
                     logger.error(f"Erreur trésorerie : {e}")
 
-                # 4. RÉPONSE
                 return Response({
                     "status": "success",
                     "message": "Avoir créé avec succès",
@@ -2050,9 +1895,6 @@ class AvoirViewSet(viewsets.ModelViewSet):
                     "stock_restored": stock_restored,
                     "stock_details": stock_details,
                     "mouvement_tresorerie_cree": mouvement_tresorerie is not None,
-                    "mouvement_reference": (
-                        mouvement_tresorerie.reference if mouvement_tresorerie else None
-                    ),
                 }, status=status.HTTP_201_CREATED)
 
         except Exception as e:
@@ -2062,9 +1904,6 @@ class AvoirViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    # ============================================================
-    # ACTION : RESTAURER LE STOCK MANUELLEMENT
-    # ============================================================
     @action(detail=True, methods=["post"], url_path="restore-stock")
     def restore_stock_action(self, request, pk=None):
         avoir = self.get_object()
@@ -2097,6 +1936,9 @@ class AvoirViewSet(viewsets.ModelViewSet):
         })
 
 
+# ============================================================
+# TAXE VIEWSET
+# ============================================================
 class TaxeViewSet(viewsets.ModelViewSet):
     queryset = Taxe.objects.all()
     serializer_class = TaxeSerializer
@@ -2131,24 +1973,29 @@ class SalesDashboardStatsViewSet(viewsets.ViewSet):
         start_of_month = today.replace(day=1)
         start_of_week = today - timedelta(days=today.weekday())
 
-        total_sales = Vente.objects.count()
-        sales_today = Vente.objects.filter(sale_date__date=today).count()
-        sales_this_month = Vente.objects.filter(
+        ventes = Vente.objects.all()
+        stats_agg = ventes.aggregate(
+            total_sales=Count('id'),
+            total_amount=Sum('total'),
+        )
+
+        sales_today = ventes.filter(sale_date__date=today).count()
+        sales_this_month = ventes.filter(
             sale_date__date__gte=start_of_month).count()
-        sales_this_week = Vente.objects.filter(
+        sales_this_week = ventes.filter(
             sale_date__date__gte=start_of_week).count()
 
-        total_amount = Vente.objects.aggregate(
+        amount_today = ventes.filter(sale_date__date=today).aggregate(
             total=Sum('total'))['total'] or 0
-        amount_today = Vente.objects.filter(sale_date__date=today).aggregate(
-            total=Sum('total'))['total'] or 0
-        amount_this_month = Vente.objects.filter(
-            sale_date__date__gte=start_of_month).aggregate(total=Sum('total'))['total'] or 0
+        amount_this_month = ventes.filter(
+            sale_date__date__gte=start_of_month
+        ).aggregate(total=Sum('total'))['total'] or 0
 
-        pending_payments = Vente.objects.filter(
+        pending_payments = ventes.filter(
             payment_status__in=['pending', 'partial']).count()
-        pending_amount = Vente.objects.filter(payment_status__in=[
-                                              'pending', 'partial']).aggregate(total=Sum('amount_due'))['total'] or 0
+        pending_amount = ventes.filter(
+            payment_status__in=['pending', 'partial']
+        ).aggregate(total=Sum('amount_due'))['total'] or 0
 
         total_clients = Client.objects.filter(statut='actif').count()
 
@@ -2164,13 +2011,13 @@ class SalesDashboardStatsViewSet(viewsets.ViewSet):
 
         return Response({
             'sales': {
-                'total': total_sales,
+                'total': stats_agg['total_sales'] or 0,
                 'today': sales_today,
                 'this_week': sales_this_week,
                 'this_month': sales_this_month
             },
             'amounts': {
-                'total': total_amount,
+                'total': stats_agg['total_amount'] or 0,
                 'today': amount_today,
                 'this_month': amount_this_month
             },
@@ -2178,9 +2025,7 @@ class SalesDashboardStatsViewSet(viewsets.ViewSet):
                 'pending': pending_payments,
                 'pending_amount': pending_amount
             },
-            'clients': {
-                'total': total_clients
-            },
+            'clients': {'total': total_clients},
             'invoices': {
                 'pending': pending_invoices,
                 'overdue': overdue_invoices
@@ -2196,92 +2041,48 @@ class SalesDashboardStatsViewSet(viewsets.ViewSet):
 
 
 # ============================================================
-# WALLET VIEWSET - COMPLET AVEC NOUVEAUX ENDPOINTS
+# WALLET VIEWSET
 # ============================================================
-
-# apps/ventes_clients/views.py - PARTIE WALLET CORRIGÉE
-
-# ============================================================
-# WALLET VIEWSET - COMPLET CORRIGÉ (SANS request.user.client)
-# ============================================================
-# apps/ventes_clients/views.py
-# ============================================================
-# WALLET VIEWSET - COMPLET CORRIGÉ
-# ============================================================
-
-
-logger = logging.getLogger(__name__)
-
-# apps/ventes_clients/views.py
-# ============================================================
-# WALLET VIEWSET - COMPLET ET CORRIGÉ
-# ============================================================
-
-
-logger = logging.getLogger(__name__)
-
-# apps/ventes_clients/views.py - WalletViewSet corrigé
-
-
 class WalletViewSet(viewsets.ViewSet):
-    """
-    API pour gérer le porte-monnaie client
-    Toutes les actions requièrent un client_id explicite
-    """
+    """API pour gérer le porte-monnaie client."""
     permission_classes = [permissions.IsAuthenticated]
 
-    # ✅ Helper pour vérifier si l'utilisateur est admin
     def _is_admin(self, user):
-        """Vérifie si l'utilisateur a le rôle admin"""
         return user.role == 'admin' or user.is_staff or user.is_superuser
 
-    # ============================================================
-    # 1. LISTE DES WALLETS (ADMIN)
-    # ============================================================
     @action(detail=False, methods=['get'], url_path='list')
     def list_wallets(self, request):
-        """
-        Liste tous les wallets avec leurs clients (admin uniquement)
-        GET /wallet/list/
-        """
-        # ✅ CORRECTION : Vérifier le rôle admin
         if not self._is_admin(request.user):
             return Response(
-                {"error": "Permission non accordée. Accès réservé aux administrateurs."},
+                {"error": "Permission non accordée."},
                 status=status.HTTP_403_FORBIDDEN
             )
 
         try:
             wallets = ClientWallet.objects.select_related(
-                'client'
-            ).all().order_by('-created_at')
-
+                'client').all().order_by('-created_at')
             total = wallets.count()
-            total_balance = wallets.aggregate(
-                total=Sum('balance')
-            )['total'] or Decimal('0')
+            total_balance = wallets.aggregate(total=Sum('balance'))[
+                'total'] or Decimal('0')
             active_count = wallets.filter(is_active=True).count()
             inactive_count = wallets.filter(is_active=False).count()
 
-            # Sérialiser manuellement avec les infos client
-            results = []
-            for wallet in wallets:
-                results.append({
-                    'id': wallet.id,
-                    'client': wallet.client.id,
-                    'client_name': wallet.client.name,
-                    'client_code': wallet.client.code,
-                    'client_phone': wallet.client.phone,
-                    'client_type': wallet.client.type,
-                    'client_statut': wallet.client.statut,
-                    'balance': wallet.balance,
-                    'balance_display': f"{wallet.balance:,.0f} FCFA",
-                    'total_deposits': wallet.total_deposits,
-                    'total_used': wallet.total_used,
-                    'is_active': wallet.is_active,
-                    'created_at': wallet.created_at,
-                    'updated_at': wallet.updated_at
-                })
+            results = [{
+                'id': w.id,
+                'client': w.client.id,
+                'client_name': w.client.name,
+                'client_code': w.client.code,
+                'client_phone': w.client.phone,
+                'client_type': w.client.type,
+                'client_statut': w.client.statut,
+                'balance': w.balance,
+                'balance_display': f"{w.balance:,.0f} FCFA",
+                'total_deposits': w.total_deposits,
+                'total_used': w.total_used,
+                'is_active': w.is_active,
+                'created_at': w.created_at,
+                'updated_at': w.updated_at
+            } for w in wallets]
 
             return Response({
                 'count': total,
@@ -2294,20 +2095,12 @@ class WalletViewSet(viewsets.ViewSet):
         except Exception as e:
             logger.error(f"❌ Erreur chargement wallets: {e}")
             return Response(
-                {"error": f"Erreur lors du chargement des wallets: {str(e)}"},
+                {"error": f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    # ============================================================
-    # 2. RÉCUPÉRER LE WALLET D'UN CLIENT SPÉCIFIQUE
-    # ============================================================
     @action(detail=True, methods=['get'], url_path='client-wallet')
     def get_client_wallet(self, request, pk=None):
-        """
-        Récupère le wallet d'un client spécifique par son ID
-        GET /wallet/{client_id}/client-wallet/
-        """
-        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         try:
             client = Client.objects.get(id=pk)
             wallet, created = ClientWallet.objects.get_or_create(client=client)
@@ -2333,24 +2126,9 @@ class WalletViewSet(viewsets.ViewSet):
                 {"error": f"Client avec l'ID {pk} non trouvé"},
                 status=status.HTTP_404_NOT_FOUND
             )
-        except Exception as e:
-            logger.error(f"❌ Erreur récupération wallet: {e}")
-            return Response(
-                {"error": f"Erreur lors de la récupération: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
 
-    # ============================================================
-    # 3. CRÉATION DU WALLET POUR UN CLIENT
-    # ============================================================
     @action(detail=False, methods=['post'], url_path='create-wallet')
     def create_wallet(self, request):
-        """
-        Crée un porte-monnaie pour un client spécifique
-        URL: POST /wallet/create-wallet/
-        Body: { "client_id": 1, "initial_balance": 0 }
-        """
-        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         client_id = request.data.get('client_id')
         initial_balance = request.data.get('initial_balance', 0)
 
@@ -2377,7 +2155,6 @@ class WalletViewSet(viewsets.ViewSet):
         try:
             client = Client.objects.get(id=client_id)
 
-            # Vérifier si le client a déjà un wallet
             if hasattr(client, 'wallet'):
                 wallet = client.wallet
                 return Response(
@@ -2431,21 +2208,12 @@ class WalletViewSet(viewsets.ViewSet):
         except Exception as e:
             logger.error(f"❌ Erreur création wallet: {e}")
             return Response(
-                {"error": f"Erreur lors de la création du wallet: {str(e)}"},
+                {"error": f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    # ============================================================
-    # 4. DÉPÔT DANS LE WALLET
-    # ============================================================
     @action(detail=False, methods=['post'])
     def deposit(self, request):
-        """
-        Déposer de l'argent dans le wallet d'un client
-        POST /wallet/deposit/
-        Body: { "client_id": 1, "amount": 1000, "payment_method": "cash", "notes": "..." }
-        """
-        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         client_id = request.data.get('client_id')
         amount = request.data.get('amount')
         notes = request.data.get('notes', '')
@@ -2490,7 +2258,6 @@ class WalletViewSet(viewsets.ViewSet):
                     created_by=request.user
                 )
 
-                # Créer un mouvement de trésorerie
                 try:
                     from tresorerie.models import MouvementTresorerie, Caisse
 
@@ -2502,13 +2269,11 @@ class WalletViewSet(viewsets.ViewSet):
                     caisse = None
                     if warehouse:
                         caisse = Caisse.objects.filter(
-                            warehouse=warehouse,
-                            is_default=True
+                            warehouse=warehouse, is_default=True
                         ).first()
                         if not caisse:
                             caisse = Caisse.objects.filter(
-                                warehouse=warehouse,
-                                is_active=True
+                                warehouse=warehouse, is_active=True
                             ).first()
 
                     if caisse:
@@ -2527,15 +2292,11 @@ class WalletViewSet(viewsets.ViewSet):
                             libelle=f"Dépôt wallet - {client.name}",
                             created_by=request.user
                         )
-
                         caisse.solde_actuel += amount
                         caisse.save(update_fields=[
                                     'solde_actuel', 'updated_at'])
-                        logger.info(
-                            f"💰 Caisse {caisse.nom} augmentée de {amount:,.0f} FCFA")
                 except Exception as e:
-                    logger.warning(
-                        f"⚠️ Erreur création mouvement trésorerie: {e}")
+                    logger.warning(f"⚠️ Erreur mouvement trésorerie: {e}")
 
                 return Response({
                     'status': 'success',
@@ -2555,21 +2316,12 @@ class WalletViewSet(viewsets.ViewSet):
         except Exception as e:
             logger.error(f"❌ Erreur lors du dépôt: {e}")
             return Response(
-                {"error": f"Erreur lors du dépôt: {str(e)}"},
+                {"error": f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    # ============================================================
-    # 5. PAYER UNE FACTURE SPÉCIFIQUE AVEC LE WALLET
-    # ============================================================
     @action(detail=False, methods=['post'], url_path='pay-invoice')
     def pay_invoice(self, request):
-        """
-        Payer une facture spécifique avec le wallet
-        POST /wallet/pay-invoice/
-        Body: { "facture_id": 1, "amount": 1000, "notes": "..." }
-        """
-        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         facture_id = request.data.get('facture_id')
         amount = request.data.get('amount')
         notes = request.data.get('notes', '')
@@ -2596,26 +2348,21 @@ class WalletViewSet(viewsets.ViewSet):
 
         try:
             with transaction.atomic():
-                # 1. Récupérer la facture
                 facture = Facture.objects.select_related(
-                    'sale', 'client'
-                ).get(id=facture_id)
+                    'sale', 'client').get(id=facture_id)
 
-                # 2. Vérifier que la facture n'est pas déjà payée
                 if facture.status == 'paid':
                     return Response(
                         {"error": "Cette facture est déjà entièrement payée"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                # 3. Vérifier le montant restant
                 remaining = facture.remaining_amount
                 if amount > remaining:
                     return Response({
                         "error": f"Le montant dépasse le solde restant ({remaining:,.0f} FCFA)"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                # 4. Récupérer le client et son wallet
                 client = facture.client
                 if not client:
                     return Response(
@@ -2626,20 +2373,17 @@ class WalletViewSet(viewsets.ViewSet):
                 wallet, created = ClientWallet.objects.get_or_create(
                     client=client)
 
-                # 5. Vérifier si le wallet est actif
                 if not wallet.is_active:
                     return Response(
                         {"error": "Le porte-monnaie est désactivé"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                # 6. Vérifier le solde du wallet
                 if wallet.balance < amount:
                     return Response({
                         "error": f"Solde insuffisant. Disponible : {wallet.balance:,.0f} FCFA"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                # 7. DÉBITER LE WALLET
                 new_balance = wallet.debit(
                     amount=amount,
                     source='payment',
@@ -2648,7 +2392,6 @@ class WalletViewSet(viewsets.ViewSet):
                     created_by=request.user
                 )
 
-                # 8. CRÉER LE PAIEMENT - ✅ AVEC MÉTHODE 'WALLET'
                 paiement = Paiement.objects.create(
                     facture=facture,
                     amount=amount,
@@ -2658,12 +2401,8 @@ class WalletViewSet(viewsets.ViewSet):
                     received_by=request.user
                 )
 
-                logger.info(f"✅ Paiement wallet créé : ID {paiement.id}")
-
-                # 9. METTRE À JOUR LA FACTURE
                 total_paid = facture.paiements.aggregate(
-                    total=Sum('amount')
-                )['total'] or Decimal('0')
+                    total=Sum('amount'))['total'] or Decimal('0')
                 facture.amount_paid = total_paid
 
                 if facture.amount_paid >= facture.total:
@@ -2673,12 +2412,10 @@ class WalletViewSet(viewsets.ViewSet):
                 facture.save(update_fields=[
                              'amount_paid', 'status', 'updated_at'])
 
-                # 10. METTRE À JOUR LA VENTE ASSOCIÉE
                 sale = facture.sale
                 if sale:
-                    total_paid_sale = Decimal('0')
-                    for inv in sale.invoices.all():
-                        total_paid_sale += inv.amount_paid
+                    total_paid_sale = sum(
+                        inv.amount_paid for inv in sale.invoices.all())
                     sale.amount_paid = total_paid_sale
                     sale.amount_due = sale.total - sale.amount_paid
 
@@ -2695,7 +2432,6 @@ class WalletViewSet(viewsets.ViewSet):
                         'payment_status', 'status', 'updated_at'
                     ])
 
-                # 11. RÉPONSE
                 return Response({
                     'status': 'success',
                     'message': f'Paiement de {amount:,.0f} FCFA effectué avec succès',
@@ -2721,24 +2457,13 @@ class WalletViewSet(viewsets.ViewSet):
             )
         except Exception as e:
             logger.error(f"❌ Erreur lors du paiement de facture: {e}")
-            import traceback
-            traceback.print_exc()
             return Response(
-                {"error": f"Erreur lors du paiement: {str(e)}"},
+                {"error": f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    # ============================================================
-    # 6. PAYER TOUTES LES FACTURES IMPAYÉES D'UN CLIENT
-    # ============================================================
     @action(detail=False, methods=['post'], url_path='pay-all-unpaid')
     def pay_all_unpaid(self, request):
-        """
-        Payer toutes les factures impayées d'un client avec le wallet
-        POST /wallet/pay-all-unpaid/
-        Body: { "client_id": 1, "notes": "..." }
-        """
-        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         client_id = request.data.get('client_id')
         notes = request.data.get(
             'notes', 'Paiement de toutes les factures impayées')
@@ -2757,14 +2482,21 @@ class WalletViewSet(viewsets.ViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # 1. Récupérer toutes les factures impayées du client
         unpaid_statuses = ['sent', 'overdue', 'partial']
-        factures = Facture.objects.filter(
-            client=client,
-            status__in=unpaid_statuses
-        ).order_by('due_date')
+        factures = (
+            Facture.objects
+            .select_related('sale')
+            .annotate(
+                remaining_calc=ExpressionWrapper(
+                    F('total') - F('amount_paid'),
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
+                )
+            )
+            .filter(client=client, status__in=unpaid_statuses, remaining_calc__gt=0)
+            .order_by('due_date')
+        )
 
-        factures_impayees = [f for f in factures if f.remaining_amount > 0]
+        factures_impayees = list(factures)
 
         if not factures_impayees:
             return Response({
@@ -2786,7 +2518,7 @@ class WalletViewSet(viewsets.ViewSet):
 
         if wallet.balance < total_amount:
             return Response({
-                "error": f"Solde insuffisant. Total des factures : {total_amount:,.0f} FCFA, Solde disponible : {wallet.balance:,.0f} FCFA"
+                "error": f"Solde insuffisant. Total: {total_amount:,.0f} FCFA, Solde: {wallet.balance:,.0f} FCFA"
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -2798,11 +2530,9 @@ class WalletViewSet(viewsets.ViewSet):
                 for facture in factures_impayees:
                     amount = facture.remaining_amount
 
-                    # Débiter le wallet
                     wallet.balance -= amount
                     wallet.total_used += amount
 
-                    # Créer la transaction wallet
                     WalletTransaction.objects.create(
                         wallet=wallet,
                         type='debit',
@@ -2814,7 +2544,6 @@ class WalletViewSet(viewsets.ViewSet):
                         created_by=request.user
                     )
 
-                    # Créer le paiement - ✅ AVEC MÉTHODE 'WALLET'
                     paiement = Paiement.objects.create(
                         facture=facture,
                         amount=amount,
@@ -2825,21 +2554,17 @@ class WalletViewSet(viewsets.ViewSet):
                     )
                     paiements_crees.append(paiement.id)
 
-                    # Mettre à jour la facture
                     total_paid = facture.paiements.aggregate(
-                        total=Sum('amount')
-                    )['total'] or Decimal('0')
+                        total=Sum('amount'))['total'] or Decimal('0')
                     facture.amount_paid = total_paid
                     facture.status = 'paid' if total_paid >= facture.total else 'partial'
                     facture.save(update_fields=[
                                  'amount_paid', 'status', 'updated_at'])
 
-                    # Mettre à jour la vente
                     sale = facture.sale
                     if sale:
-                        total_paid_sale = Decimal('0')
-                        for inv in sale.invoices.all():
-                            total_paid_sale += inv.amount_paid
+                        total_paid_sale = sum(
+                            inv.amount_paid for inv in sale.invoices.all())
                         sale.amount_paid = total_paid_sale
                         sale.amount_due = sale.total - sale.amount_paid
                         if sale.amount_due <= 0:
@@ -2858,7 +2583,6 @@ class WalletViewSet(viewsets.ViewSet):
                     total_paye += amount
                     factures_payees.append(facture.invoice_number)
 
-                # Sauvegarder le wallet
                 wallet.save(update_fields=[
                             'balance', 'total_used', 'updated_at'])
 
@@ -2880,47 +2604,34 @@ class WalletViewSet(viewsets.ViewSet):
             )
         except Exception as e:
             logger.error(f"❌ Erreur lors du paiement groupé: {e}")
-            import traceback
-            traceback.print_exc()
             return Response(
-                {"error": f"Erreur lors du paiement: {str(e)}"},
+                {"error": f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    # ============================================================
-    # 7. HISTORIQUE DES TRANSACTIONS D'UN CLIENT
-    # ============================================================
     @action(detail=True, methods=['get'], url_path='transactions')
     def client_transactions(self, request, pk=None):
-        """
-        Historique des transactions du wallet d'un client
-        GET /wallet/{client_id}/transactions/
-        """
-        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         try:
             client = Client.objects.get(id=pk)
             wallet, created = ClientWallet.objects.get_or_create(client=client)
             transactions = wallet.transactions.all().order_by(
                 '-created_at')[:50]
 
-            # Sérialiser manuellement
-            transactions_data = []
-            for t in transactions:
-                transactions_data.append({
-                    'id': t.id,
-                    'type': t.type,
-                    'type_display': t.get_type_display(),
-                    'amount': t.amount,
-                    'amount_display': f"{t.amount:,.0f} FCFA",
-                    'source': t.source,
-                    'source_display': t.get_source_display(),
-                    'reference': t.reference,
-                    'notes': t.notes,
-                    'balance_after': t.balance_after,
-                    'created_at': t.created_at,
-                    'created_by': t.created_by.id if t.created_by else None,
-                    'created_by_name': t.created_by.get_full_name() if t.created_by else None
-                })
+            transactions_data = [{
+                'id': t.id,
+                'type': t.type,
+                'type_display': t.get_type_display(),
+                'amount': t.amount,
+                'amount_display': f"{t.amount:,.0f} FCFA",
+                'source': t.source,
+                'source_display': t.get_source_display(),
+                'reference': t.reference,
+                'notes': t.notes,
+                'balance_after': t.balance_after,
+                'created_at': t.created_at,
+                'created_by': t.created_by.id if t.created_by else None,
+                'created_by_name': t.created_by.get_full_name() if t.created_by else None
+            } for t in transactions]
 
             return Response({
                 'client_id': client.id,
@@ -2934,23 +2645,9 @@ class WalletViewSet(viewsets.ViewSet):
                 {"error": f"Client avec l'ID {pk} non trouvé"},
                 status=status.HTTP_404_NOT_FOUND
             )
-        except Exception as e:
-            logger.error(f"❌ Erreur récupération transactions: {e}")
-            return Response(
-                {"error": f"Erreur lors de la récupération: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
 
-    # ============================================================
-    # 8. ADMIN : STATISTIQUES GLOBALES
-    # ============================================================
     @action(detail=False, methods=['get'])
     def stats(self, request):
-        """
-        Admin : Statistiques globales des wallets
-        GET /wallet/stats/
-        """
-        # ✅ CORRECTION : Vérifier le rôle admin
         if not self._is_admin(request.user):
             return Response(
                 {"error": "Permission non accordée"},
@@ -2965,7 +2662,6 @@ class WalletViewSet(viewsets.ViewSet):
                 is_active=True).count()
             inactive_wallets = ClientWallet.objects.filter(
                 is_active=False).count()
-
             avg_balance = total_balance / \
                 total_wallets if total_wallets > 0 else Decimal('0')
 
@@ -2981,24 +2677,15 @@ class WalletViewSet(viewsets.ViewSet):
         except Exception as e:
             logger.error(f"❌ Erreur calcul statistiques: {e}")
             return Response(
-                {"error": f"Erreur lors du calcul des statistiques: {str(e)}"},
+                {"error": f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    # ============================================================
-    # 9. ADMIN : AJUSTER LE SOLDE D'UN WALLET
-    # ============================================================
     @action(detail=True, methods=['post'], url_path='adjust-balance')
     def adjust_balance(self, request, pk=None):
-        """
-        Admin : Ajuster le solde d'un wallet (ajout ou retrait)
-        POST /wallet/{wallet_id}/adjust-balance/
-        Body: { "amount": 1000, "type": "credit"|"debit", "notes": "..." }
-        """
-        # ✅ CORRECTION : Vérifier le rôle admin
         if not self._is_admin(request.user):
             return Response(
-                {"error": "Permission non accordée. Réservé aux administrateurs."},
+                {"error": "Permission non accordée."},
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -3075,24 +2762,15 @@ class WalletViewSet(viewsets.ViewSet):
         except Exception as e:
             logger.error(f"❌ Erreur lors de l'ajustement: {e}")
             return Response(
-                {"error": f"Erreur lors de l'ajustement: {str(e)}"},
+                {"error": f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    # ============================================================
-    # 10. ADMIN : ACTIVER/DÉSACTIVER UN WALLET
-    # ============================================================
     @action(detail=True, methods=['post'], url_path='toggle-status')
     def toggle_status(self, request, pk=None):
-        """
-        Admin : Activer/désactiver un wallet
-        POST /wallet/{wallet_id}/toggle-status/
-        Body: { "is_active": true/false }
-        """
-        # ✅ CORRECTION : Vérifier le rôle admin
         if not self._is_admin(request.user):
             return Response(
-                {"error": "Permission non accordée. Réservé aux administrateurs."},
+                {"error": "Permission non accordée."},
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -3102,11 +2780,10 @@ class WalletViewSet(viewsets.ViewSet):
 
             if is_active is None:
                 return Response(
-                    {"error": "Le champ 'is_active' est requis (true ou false)"},
+                    {"error": "Le champ 'is_active' est requis"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Convertir en booléen si nécessaire
             if isinstance(is_active, str):
                 is_active = is_active.lower() == 'true'
 
@@ -3125,23 +2802,9 @@ class WalletViewSet(viewsets.ViewSet):
                 {"error": f"Porte-monnaie avec l'ID {pk} non trouvé"},
                 status=status.HTTP_404_NOT_FOUND
             )
-        except Exception as e:
-            logger.error(f"❌ Erreur changement statut: {e}")
-            return Response(
-                {"error": f"Erreur lors du changement de statut: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
 
-    # ============================================================
-    # 11. VÉRIFIER SI UN CLIENT A UN WALLET
-    # ============================================================
     @action(detail=True, methods=['get'], url_path='has-wallet')
     def has_wallet(self, request, pk=None):
-        """
-        Vérifie si un client a un wallet
-        GET /wallet/{client_id}/has-wallet/
-        """
-        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         try:
             client = Client.objects.get(id=pk)
             has_wallet = hasattr(client, 'wallet')
@@ -3160,23 +2823,9 @@ class WalletViewSet(viewsets.ViewSet):
                 {"error": f"Client avec l'ID {pk} non trouvé"},
                 status=status.HTTP_404_NOT_FOUND
             )
-        except Exception as e:
-            logger.error(f"❌ Erreur vérification wallet: {e}")
-            return Response(
-                {"error": f"Erreur lors de la vérification: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
 
-    # ============================================================
-    # 12. RÉCUPÉRER UN WALLET PAR SON ID
-    # ============================================================
     @action(detail=True, methods=['get'], url_path='get-wallet')
     def get_wallet_by_id(self, request, pk=None):
-        """
-        Récupère un wallet spécifique par son ID
-        GET /wallet/{wallet_id}/get-wallet/
-        """
-        # ✅ Autoriser tous les utilisateurs authentifiés pour cette action
         try:
             wallet = ClientWallet.objects.select_related('client').get(id=pk)
 
@@ -3200,30 +2849,17 @@ class WalletViewSet(viewsets.ViewSet):
                 {"error": f"Porte-monnaie avec l'ID {pk} non trouvé"},
                 status=status.HTTP_404_NOT_FOUND
             )
-        except Exception as e:
-            logger.error(f"❌ Erreur récupération wallet: {e}")
-            return Response(
-                {"error": f"Erreur lors de la récupération: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+
 
 # ============================================================
-# ✅ NOUVEAU : Client Wallet ViewSet (pour gérer directement via le client)
+# CLIENT WALLET VIEWSET
 # ============================================================
-
-
 class ClientWalletViewSet(viewsets.ViewSet):
-    """
-    API pour gérer le porte-monnaie des clients via l'ID du client
-    """
+    """API pour gérer le porte-monnaie des clients via l'ID du client."""
     permission_classes = [permissions.IsAuthenticated]
 
     @action(detail=True, methods=['get'], url_path='wallet')
     def get_wallet(self, request, pk=None):
-        """
-        Récupère le wallet d'un client
-        GET /clients/{id}/wallet/
-        """
         try:
             client = Client.objects.get(id=pk)
             wallet, created = ClientWallet.objects.get_or_create(client=client)
@@ -3237,13 +2873,6 @@ class ClientWalletViewSet(viewsets.ViewSet):
 
     @action(detail=True, methods=['post'], url_path='wallet/deposit')
     def deposit(self, request, pk=None):
-        """
-        Dépose de l'argent dans le wallet d'un client
-        POST /clients/{id}/wallet/deposit/
-        Body: { "amount": 1000, "notes": "..." }
-        """
-        from decimal import Decimal
-
         try:
             client = Client.objects.get(id=pk)
             wallet, created = ClientWallet.objects.get_or_create(client=client)
@@ -3297,16 +2926,12 @@ class ClientWalletViewSet(viewsets.ViewSet):
         except Exception as e:
             logger.error(f"❌ Erreur lors du dépôt: {e}")
             return Response(
-                {"error": f"Erreur lors du dépôt: {str(e)}"},
+                {"error": f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
     @action(detail=True, methods=['get'], url_path='wallet/transactions')
     def transactions(self, request, pk=None):
-        """
-        Historique des transactions du wallet d'un client
-        GET /clients/{id}/wallet/transactions/
-        """
         try:
             client = Client.objects.get(id=pk)
             wallet, created = ClientWallet.objects.get_or_create(client=client)
@@ -3325,11 +2950,3 @@ class ClientWalletViewSet(viewsets.ViewSet):
                 {"error": "Client non trouvé"},
                 status=status.HTTP_404_NOT_FOUND
             )
-
-
-# ============================================================
-# EXPORTATIONS POUR LES URLS
-# ============================================================
-
-# On garde tous les ViewSets déjà exportés
-# On ajoute ClientWalletViewSet

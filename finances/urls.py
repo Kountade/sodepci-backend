@@ -13,7 +13,6 @@ from .views import (
 )
 
 router = DefaultRouter()
-
 router.register('comptes-comptables', CompteComptableViewSet,
                 basename='comptes-comptables')
 router.register('ecritures-comptables', EcritureComptableViewSet,

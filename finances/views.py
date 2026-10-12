@@ -217,6 +217,8 @@ class EcritureComptableViewSet(viewsets.ModelViewSet):
 # DÉPENSE VIEWSET
 # ============================================================
 
+# apps/finances/views.py - PARTIE DepenseViewSet
+
 class DepenseViewSet(viewsets.ModelViewSet):
     """ViewSet pour la gestion des dépenses"""
     queryset = Depense.objects.all()
@@ -288,23 +290,44 @@ class DepenseViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def payer(self, request, pk=None):
-        """Marque une dépense comme payée"""
+        """
+        ✅ Marque la dépense payée et déclenche :
+        - Le mouvement de trésorerie (décaissement)
+        - L'écriture comptable automatique
+        """
         depense = self.get_object()
 
-        if depense.statut != 'approuve':
+        if depense.statut == 'paye':
             return Response(
-                {"error": "Seules les dépenses approuvées peuvent être payées"},
+                {"error": "Cette dépense est déjà payée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        depense.payer(request.user)
+        if depense.statut not in ['en_attente', 'approuve']:
+            return Response(
+                {"error": f"Impossible de payer une dépense au statut '{depense.get_statut_display()}'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        return Response({
-            'status': depense.statut,
-            'message': 'Dépense marquée comme payée',
-            'reference': depense.reference,
-            'date_paiement': depense.date_paiement
-        })
+        try:
+            result = depense.payer(request.user)
+
+            depense.refresh_from_db()
+
+            return Response({
+                'status': depense.statut,
+                'message': 'Dépense payée — Mouvement et écriture comptable créés',
+                'reference': depense.reference,
+                'date_paiement': depense.date_paiement,
+                'mouvement_id': depense.tresorerie_id,
+                'ecriture_id': depense.ecriture_id,
+                'errors': result.get('errors', []),
+            })
+        except Exception as e:
+            return Response(
+                {"error": f"Erreur lors du paiement : {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=True, methods=['post'])
     def rejeter(self, request, pk=None):
@@ -318,7 +341,7 @@ class DepenseViewSet(viewsets.ModelViewSet):
             )
 
         depense.statut = 'rejete'
-        depense.save()
+        depense.save(update_fields=['statut', 'updated_at'])
 
         return Response({
             'status': depense.statut,
@@ -326,10 +349,44 @@ class DepenseViewSet(viewsets.ModelViewSet):
             'reference': depense.reference
         })
 
+    @action(detail=True, methods=['post'])
+    def synchroniser(self, request, pk=None):
+        """
+        ✅ Force la synchronisation : crée le mouvement de trésorerie
+        et l'écriture comptable si absents.
+        """
+        depense = self.get_object()
+
+        if depense.statut != 'paye':
+            return Response(
+                {"error": "La dépense doit être payée pour être synchronisée"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            result = depense.creer_mouvement_et_ecriture(request.user)
+            depense.refresh_from_db()
+
+            return Response({
+                'message': 'Synchronisation effectuée',
+                'mouvement_id': depense.tresorerie_id,
+                'ecriture_id': depense.ecriture_id,
+                'errors': result.get('errors', []),
+            })
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 # ============================================================
 # BUDGET VIEWSET
 # ============================================================
+
+# ============================================================
+# BUDGET VIEWSET
+# ============================================================
+
 
 class BudgetViewSet(viewsets.ModelViewSet):
     """ViewSet pour la gestion des budgets"""
@@ -337,7 +394,9 @@ class BudgetViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, IsComptable]
 
     def get_serializer_class(self):
-        if self.action in ['create']:
+        if self.action == 'create':
+            return BudgetCreateSerializer
+        elif self.action in ['update', 'partial_update']:
             return BudgetCreateSerializer
         return BudgetSerializer
 
@@ -375,7 +434,7 @@ class BudgetViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def update_utilise(self, request, pk=None):
-        """Met à jour le montant utilisé du budget"""
+        """Met à jour le montant utilisé du budget (recalcul depuis les lignes)"""
         budget = self.get_object()
         budget.update_utilise()
 
@@ -385,7 +444,70 @@ class BudgetViewSet(viewsets.ModelViewSet):
             'montant_total': budget.montant_total,
             'montant_utilise': budget.montant_utilise,
             'montant_restant': budget.montant_restant,
-            'pourcentage_utilise': (budget.montant_utilise / budget.montant_total * 100) if budget.montant_total > 0 else 0
+            'pourcentage_utilise': (
+                budget.montant_utilise / budget.montant_total * 100
+            ) if budget.montant_total > 0 else 0
+        })
+
+    @action(detail=True, methods=['get'])
+    def alertes(self, request, pk=None):
+        """Récupère les lignes du budget en alerte (>80%)"""
+        budget = self.get_object()
+        alertes = []
+
+        for ligne in budget.lignes.all():
+            if ligne.montant_prevu > 0:
+                pourcentage = (ligne.montant_utilise /
+                               ligne.montant_prevu) * 100
+                if pourcentage >= 80:
+                    alertes.append({
+                        'ligne_id': ligne.id,
+                        'categorie': ligne.categorie.nom,
+                        'categorie_depense': ligne.categorie.categorie_depense,
+                        'montant_prevu': float(ligne.montant_prevu),
+                        'montant_utilise': float(ligne.montant_utilise),
+                        'montant_restant': float(ligne.montant_restant),
+                        'pourcentage': round(pourcentage, 2),
+                    })
+
+        return Response({
+            'budget_id': budget.id,
+            'budget_nom': budget.nom,
+            'nb_alertes': len(alertes),
+            'alertes': alertes
+        })
+
+    @action(detail=False, methods=['get'])
+    def actifs(self, request):
+        """Liste des budgets actuellement en cours"""
+        today = timezone.now().date()
+        budgets = Budget.objects.filter(
+            statut='en_cours',
+            date_debut__lte=today,
+            date_fin__gte=today
+        )
+        serializer = BudgetSerializer(budgets, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def cloturer(self, request, pk=None):
+        """Clôture un budget (le passe en 'termine')"""
+        budget = self.get_object()
+
+        if budget.statut == 'termine':
+            return Response(
+                {"error": "Ce budget est déjà clôturé"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        budget.statut = 'termine'
+        budget.save(update_fields=['statut', 'updated_at'])
+
+        return Response({
+            'status': budget.statut,
+            'message': f'Budget "{budget.nom}" clôturé avec succès',
+            'montant_utilise': budget.montant_utilise,
+            'montant_restant': budget.montant_restant,
         })
 
 
@@ -395,10 +517,34 @@ class BudgetCategorieViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, IsComptable]
     serializer_class = BudgetCategorieSerializer
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(nom__icontains=search) | Q(code__icontains=search)
+            )
+
+        is_active = self.request.query_params.get('is_active')
+        if is_active == 'true':
+            queryset = queryset.filter(is_active=True)
+        elif is_active == 'false':
+            queryset = queryset.filter(is_active=False)
+
+        return queryset
+
+    @action(detail=False, methods=['get'])
+    def non_liees(self, request):
+        """Liste les catégories de budget non liées à une catégorie de dépense"""
+        categories = self.get_queryset().filter(categorie_depense__isnull=True)
+        serializer = self.get_serializer(categories, many=True)
+        return Response(serializer.data)
 
 # ============================================================
 # RAPPORT FINANCIER VIEWSET
 # ============================================================
+
 
 class RapportFinancierViewSet(viewsets.ModelViewSet):
     """ViewSet pour la gestion des rapports financiers"""
