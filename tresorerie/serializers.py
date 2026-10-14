@@ -64,24 +64,35 @@ class CompteBancaireSerializer(serializers.ModelSerializer):
     solde_actuel_formate = serializers.SerializerMethodField()
     solde_initial_formate = serializers.SerializerMethodField()
 
+    # ✅ AJOUTS POUR LE DETAIL
+    warehouse_name = serializers.CharField(
+        source='warehouse.name', read_only=True, allow_null=True)
+    warehouse_code = serializers.CharField(
+        source='warehouse.code', read_only=True, allow_null=True)
+    created_by_name = serializers.CharField(
+        source='created_by.full_name', read_only=True, allow_null=True)
+
     class Meta:
         model = CompteBancaire
         fields = [
-            'id', 'banque', 'code', 'nom', 'type_compte', 'warehouse',
+            'id', 'banque', 'code', 'nom', 'type_compte',
+            'warehouse', 'warehouse_name', 'warehouse_code',
             'numero_compte', 'iban', 'bic', 'devise',
-            'solde_initial', 'solde_initial_formate', 'solde_actuel', 'solde_actuel_formate',
+            'solde_initial', 'solde_initial_formate',
+            'solde_actuel', 'solde_actuel_formate',
             'is_active', 'is_default', 'date_ouverture', 'description',
-            'created_at', 'updated_at', 'created_by'
+            'created_at', 'updated_at',
+            'created_by', 'created_by_name',
         ]
-        read_only_fields = ['solde_actuel',
-                            'created_at', 'updated_at', 'created_by']
+        read_only_fields = [
+            'solde_actuel', 'created_at', 'updated_at', 'created_by'
+        ]
 
     def get_solde_actuel_formate(self, obj):
         return f"{obj.solde_actuel:,.0f} FCFA"
 
     def get_solde_initial_formate(self, obj):
         return f"{obj.solde_initial:,.0f} FCFA"
-
 
 # ----------------------------------------------
 # 3. MOUVEMENTS DE TRESORERIE
