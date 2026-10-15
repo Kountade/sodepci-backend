@@ -1,10 +1,15 @@
 # apps/achats_fournisseurs/views.py
+# ============================================================
+# VIEWS COMPLET OPTIMISÉ
+# ============================================================
+
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.db.models import Q, Sum, Count
+from django.db.models import Q, Sum, Count, F, ExpressionWrapper, DecimalField
 from django.utils import timezone
 from datetime import date
+import datetime as dt
 
 from .models import (
     Supplier, SupplierContact, SupplierProduct, PurchaseOrder,
@@ -14,70 +19,121 @@ from .models import (
 from .serializers import (
     SupplierListSerializer, SupplierDetailSerializer, SupplierWriteSerializer,
     SupplierContactSerializer, SupplierProductSerializer,
+    SupplierLiteSerializer,
     PurchaseOrderListSerializer, PurchaseOrderDetailSerializer,
     PurchaseOrderCreateSerializer, PurchaseOrderUpdateSerializer,
-    PurchaseOrderApproveSerializer,
+    PurchaseOrderApproveSerializer, PurchaseOrderLiteSerializer,
     ReceiptListSerializer, ReceiptDetailSerializer, ReceiptCreateSerializer,
-    ReceiptChoiceSerializer,
+    ReceiptChoiceSerializer, ReceiptLiteSerializer,
     PurchaseReturnSerializer, PurchaseReturnCreateSerializer,
     SupplierInvoiceListSerializer, SupplierInvoiceDetailSerializer,
     SupplierInvoiceCreateSerializer, SupplierInvoiceUpdateSerializer,
-    SupplierInvoicePaymentSerializer,
+    SupplierInvoicePaymentSerializer, SupplierInvoiceLiteSerializer,
     FournisseurPaiementSerializer, FournisseurPaiementCreateSerializer
+)
+from .pagination import (
+    SupplierPagination, PurchaseOrderPagination, ReceiptPagination,
+    SupplierInvoicePagination, PaymentPagination,
 )
 from users.permissions import IsAdmin, IsGestionnaire, IsMagasinier
 
 
 # ============================================================
-# FOURNISSEUR VIEWSET
+# FOURNISSEUR VIEWSET - OPTIMISÉ
 # ============================================================
-
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.all()
     permission_classes = [permissions.IsAuthenticated, IsGestionnaire]
+    pagination_class = SupplierPagination
 
     def get_serializer_class(self):
         if self.action == 'list':
             return SupplierListSerializer
         elif self.action in ['create', 'update', 'partial_update']:
             return SupplierWriteSerializer
+        elif self.action == 'for_select':
+            return SupplierLiteSerializer
         return SupplierDetailSerializer
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # ✅ Annotation des dettes en SQL (évite 2 requêtes par fournisseur)
+        queryset = (
+            Supplier.objects
+            .annotate(
+                total_debt_annotated=Sum(
+                    F('invoices__total_amount') - F('invoices__amount_paid'),
+                    filter=Q(invoices__paiement_status__in=['unpaid', 'partial', 'overdue'])
+                ),
+                overdue_debt_annotated=Sum(
+                    F('invoices__total_amount') - F('invoices__amount_paid'),
+                    filter=Q(
+                        invoices__due_date__lt=date.today(),
+                        invoices__paiement_status__in=['unpaid', 'partial']
+                    )
+                ),
+            )
+            .order_by('name')
+        )
+
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
                 Q(name__icontains=search) |
                 Q(code__icontains=search) |
                 Q(phone__icontains=search) |
-                Q(email__icontains=search)
+                Q(email__icontains=search) |
+                Q(commercial_name__icontains=search)
             )
+
         type_filter = self.request.query_params.get('type')
         if type_filter:
             queryset = queryset.filter(type=type_filter)
+
         is_active = self.request.query_params.get('is_active')
         if is_active == 'true':
             queryset = queryset.filter(is_active=True)
         elif is_active == 'false':
             queryset = queryset.filter(is_active=False)
+
         is_preferred = self.request.query_params.get('is_preferred')
         if is_preferred == 'true':
             queryset = queryset.filter(is_preferred=True)
+
         ordering = self.request.query_params.get('ordering', 'name')
         if ordering:
             queryset = queryset.order_by(ordering)
+
         return queryset
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    @action(detail=False, methods=['get'], url_path='for-select')
+    def for_select(self, request):
+        """✅ Liste ultra-légère pour les <select>."""
+        queryset = Supplier.objects.filter(is_active=True).only(
+            'id', 'code', 'name', 'phone', 'email', 'is_active'
+        ).order_by('name')
+        serializer = SupplierLiteSerializer(queryset, many=True)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['get'])
     def debt_status(self, request, pk=None):
         supplier = self.get_object()
+        aggregates = supplier.invoices.filter(
+            paiement_status__in=['unpaid', 'partial', 'overdue']
+        ).aggregate(
+            total_debt=Sum(F('total_amount') - F('amount_paid')),
+        )
+        overdue_aggregates = supplier.invoices.filter(
+            due_date__lt=date.today(),
+            paiement_status__in=['unpaid', 'partial']
+        ).aggregate(
+            overdue_debt=Sum(F('total_amount') - F('amount_paid')),
+        )
         return Response({
-            'total_debt': supplier.total_debt,
-            'overdue_debt': supplier.overdue_debt,
+            'total_debt': aggregates['total_debt'] or 0,
+            'overdue_debt': overdue_aggregates['overdue_debt'] or 0,
             'total_invoices': supplier.invoices.count(),
             'overdue_invoices': supplier.invoices.filter(
                 due_date__lt=date.today(),
@@ -89,17 +145,25 @@ class SupplierViewSet(viewsets.ModelViewSet):
     def orders_status(self, request, pk=None):
         supplier = self.get_object()
         orders = supplier.purchase_orders.all()
+        aggregates = orders.aggregate(
+            total_orders=Count('id'),
+            total_amount=Sum('total'),
+            received_amount=Sum('total_received_amount'),
+            invoiced_amount=Sum('total_invoiced_amount'),
+            paid_amount=Sum('total_paid_amount'),
+        )
+        by_status = dict(
+            orders.values_list('status')
+            .annotate(count=Count('id'))
+            .values_list('status', 'count')
+        )
         return Response({
-            'total_orders': orders.count(),
-            'total_amount': orders.aggregate(total=Sum('total'))['total'] or 0,
-            'received_amount': orders.aggregate(total=Sum('total_received_amount'))['total'] or 0,
-            'invoiced_amount': orders.aggregate(total=Sum('total_invoiced_amount'))['total'] or 0,
-            'paid_amount': orders.aggregate(total=Sum('total_paid_amount'))['total'] or 0,
-            'orders_by_status': {
-                status_code: orders.filter(status=status_code).count()
-                for status_code, _ in PurchaseOrder.STATUS_CHOICES
-                if orders.filter(status=status_code).count() > 0
-            }
+            'total_orders': aggregates['total_orders'] or 0,
+            'total_amount': aggregates['total_amount'] or 0,
+            'received_amount': aggregates['received_amount'] or 0,
+            'invoiced_amount': aggregates['invoiced_amount'] or 0,
+            'paid_amount': aggregates['paid_amount'] or 0,
+            'orders_by_status': by_status,
         })
 
     @action(detail=True, methods=['get'])
@@ -121,33 +185,40 @@ class SupplierViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def products(self, request, pk=None):
         supplier = self.get_object()
-        products = supplier.products.filter(is_active=True)
+        products = supplier.products.filter(is_active=True).select_related('product')
         serializer = SupplierProductSerializer(products, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
     def purchase_orders(self, request, pk=None):
         supplier = self.get_object()
-        orders = supplier.purchase_orders.all().order_by('-order_date')
+        orders = (
+            supplier.purchase_orders
+            .select_related('supplier')
+            .order_by('-order_date')[:50]
+        )
         serializer = PurchaseOrderListSerializer(orders, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
     def invoices(self, request, pk=None):
         supplier = self.get_object()
-        invoices = supplier.invoices.all().order_by('-invoice_date')
+        invoices = (
+            supplier.invoices
+            .select_related('purchase_order', 'supplier')
+            .order_by('-invoice_date')[:50]
+        )
         serializer = SupplierInvoiceListSerializer(invoices, many=True)
         return Response(serializer.data)
 
 
 # ============================================================
-# BON DE COMMANDE VIEWSET
+# BON DE COMMANDE VIEWSET - OPTIMISÉ
 # ============================================================
-# apps/achats_fournisseurs/views.py - Partie PurchaseOrderViewSet
-
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all()
     permission_classes = [permissions.IsAuthenticated, IsGestionnaire]
+    pagination_class = PurchaseOrderPagination
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -156,6 +227,8 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             return PurchaseOrderCreateSerializer
         elif self.action in ['update', 'partial_update']:
             return PurchaseOrderUpdateSerializer
+        elif self.action in ['for_select', 'available_for_receipt']:
+            return PurchaseOrderLiteSerializer
         return PurchaseOrderDetailSerializer
 
     def get_serializer_context(self):
@@ -164,53 +237,99 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # ✅ CRITIQUE : select_related + prefetch_related
+        queryset = (
+            PurchaseOrder.objects
+            .select_related('supplier', 'created_by', 'approved_by')
+            .prefetch_related('lines', 'lines__product')
+            .order_by('-order_date', '-id')
+        )
+
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
                 Q(po_number__icontains=search) |
                 Q(supplier__name__icontains=search) |
-                Q(supplier__code__icontains=search)
+                Q(supplier__code__icontains=search) |
+                Q(supplier_reference__icontains=search)
             )
+
         supplier = self.request.query_params.get('supplier')
         if supplier:
             queryset = queryset.filter(supplier_id=supplier)
 
-        # ✅ CORRECTION : Gestion du statut pour les réceptions
         status_filter = self.request.query_params.get('status')
         if status_filter == 'confirmed':
-            # Pour la liste des réceptions : inclure 'confirmed' ET 'partial'
             queryset = queryset.filter(status__in=['confirmed', 'partial'])
         elif status_filter:
             queryset = queryset.filter(status=status_filter)
 
+        is_fully_received = self.request.query_params.get('is_fully_received')
+        if is_fully_received is not None:
+            queryset = queryset.filter(is_fully_received=(is_fully_received == 'true'))
+
+        is_fully_invoiced = self.request.query_params.get('is_fully_invoiced')
+        if is_fully_invoiced is not None:
+            queryset = queryset.filter(is_fully_invoiced=(is_fully_invoiced == 'true'))
+
+        is_fully_paid = self.request.query_params.get('is_fully_paid')
+        if is_fully_paid is not None:
+            queryset = queryset.filter(is_fully_paid=(is_fully_paid == 'true'))
+
+        # ✅ Filtres INDEX-FRIENDLY (pas de __date)
         date_from = self.request.query_params.get('date_from')
         if date_from:
-            queryset = queryset.filter(order_date__date__gte=date_from)
+            try:
+                date_start = dt.datetime.strptime(date_from, '%Y-%m-%d')
+                queryset = queryset.filter(order_date__gte=date_start)
+            except ValueError:
+                pass
+
         date_to = self.request.query_params.get('date_to')
         if date_to:
-            queryset = queryset.filter(order_date__date__lte=date_to)
+            try:
+                date_end = dt.datetime.strptime(date_to, '%Y-%m-%d')
+                date_end = date_end.replace(hour=23, minute=59, second=59)
+                queryset = queryset.filter(order_date__lte=date_end)
+            except ValueError:
+                pass
+
         ordering = self.request.query_params.get('ordering', '-order_date')
         if ordering:
             queryset = queryset.order_by(ordering)
+
         return queryset
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    @action(detail=False, methods=['get'], url_path='for-select')
+    def for_select(self, request):
+        """✅ Liste légère pour <select>."""
+        status_filter = request.query_params.get('status', 'confirmed,partial')
+        statuses = [s.strip() for s in status_filter.split(',')]
+        queryset = (
+            PurchaseOrder.objects
+            .filter(status__in=statuses)
+            .select_related('supplier')
+            .only('id', 'po_number', 'supplier_id', 'order_date', 'total', 'status',
+                  'supplier__name', 'is_fully_received', 'is_fully_invoiced',
+                  'is_fully_paid')
+            .order_by('-order_date')[:200]
+        )
+        serializer = PurchaseOrderLiteSerializer(queryset, many=True)
+        return Response(serializer.data)
+
     @action(detail=False, methods=['get'])
     def available_for_receipt(self, request):
-        """
-        ✅ NOUVEL ENDPOINT : Récupère les commandes disponibles pour réception
-        - Commandes confirmées (status='confirmed')
-        - Commandes partiellement reçues (status='partial') qui ne sont pas encore entièrement reçues
-        """
-        queryset = PurchaseOrder.objects.filter(
-            status__in=['confirmed', 'partial'],
-            is_fully_received=False
-        ).order_by('-order_date')
+        """✅ Commandes disponibles pour réception (paginé)."""
+        queryset = (
+            PurchaseOrder.objects
+            .filter(status__in=['confirmed', 'partial'], is_fully_received=False)
+            .select_related('supplier')
+            .order_by('-order_date')
+        )
 
-        # Filtrer par recherche
         search = request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -218,16 +337,16 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
                 Q(supplier__name__icontains=search)
             )
 
-        # Filtrer par fournisseur
         supplier = request.query_params.get('supplier')
         if supplier:
             queryset = queryset.filter(supplier_id=supplier)
 
-        # Exclure les commandes déjà entièrement reçues (sécurité)
-        queryset = queryset.filter(is_fully_received=False)
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = PurchaseOrderLiteSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
 
-        serializer = PurchaseOrderListSerializer(
-            queryset, many=True, context={'request': request})
+        serializer = PurchaseOrderLiteSerializer(queryset, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
@@ -287,22 +406,30 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def receipts(self, request, pk=None):
         purchase_order = self.get_object()
-        receipts = purchase_order.receipts.all()
-        serializer = ReceiptListSerializer(receipts, many=True)
+        receipts = purchase_order.receipts.select_related('warehouse', 'created_by')
+        serializer = ReceiptListSerializer(receipts, many=True, context={'request': request})
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
     def invoices(self, request, pk=None):
         purchase_order = self.get_object()
-        invoices = purchase_order.invoices.all()
-        serializer = SupplierInvoiceListSerializer(invoices, many=True)
+        invoices = purchase_order.invoices.select_related('supplier')
+        serializer = SupplierInvoiceListSerializer(
+            invoices, many=True, context={'request': request}
+        )
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
     def payments(self, request, pk=None):
         purchase_order = self.get_object()
-        payments = purchase_order.paiements.filter(status='confirmed')
-        serializer = FournisseurPaiementSerializer(payments, many=True)
+        payments = (
+            purchase_order.paiements
+            .filter(status='confirmed')
+            .select_related('supplier_invoice', 'supplier_invoice__supplier', 'created_by')
+        )
+        serializer = FournisseurPaiementSerializer(
+            payments, many=True, context={'request': request}
+        )
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
@@ -321,18 +448,14 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-# ============================================================
-# RÉCEPTION VIEWSET
-# ============================================================
-
 
 # ============================================================
-# RÉCEPTION VIEWSET
+# RÉCEPTION VIEWSET - OPTIMISÉ
 # ============================================================
-
 class ReceiptViewSet(viewsets.ModelViewSet):
     queryset = Receipt.objects.all()
     permission_classes = [permissions.IsAuthenticated, IsMagasinier]
+    pagination_class = ReceiptPagination
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -340,7 +463,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         elif self.action == 'create':
             return ReceiptCreateSerializer
         elif self.action == 'available_for_invoice':
-            return ReceiptChoiceSerializer
+            return ReceiptLiteSerializer
         return ReceiptDetailSerializer
 
     def get_serializer_context(self):
@@ -349,24 +472,28 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset().select_related(
-            'purchase_order',
-            'purchase_order__supplier',
-            'warehouse',
-            'created_by'
-        ).prefetch_related('lines', 'lines__product')
+        # ✅ CRITIQUE : select_related + prefetch_related
+        queryset = (
+            Receipt.objects
+            .select_related(
+                'purchase_order',
+                'purchase_order__supplier',
+                'warehouse',
+                'created_by',
+                'supplier_invoice',
+            )
+            .prefetch_related('lines', 'lines__product', 'lines__lot')
+            .order_by('-receipt_date', '-id')
+        )
 
-        # Filtre par commande
         purchase_order = self.request.query_params.get('purchase_order')
         if purchase_order:
             queryset = queryset.filter(purchase_order_id=purchase_order)
 
-        # Filtre par statut
         status_filter = self.request.query_params.get('status')
         if status_filter:
             queryset = queryset.filter(status=status_filter)
 
-        # ✅ NOUVEAU : Filtre par is_invoiced
         is_invoiced = self.request.query_params.get('is_invoiced')
         if is_invoiced is not None:
             if is_invoiced.lower() == 'true':
@@ -374,26 +501,32 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             elif is_invoiced.lower() == 'false':
                 queryset = queryset.filter(is_invoiced=False)
 
-        # Filtre par entrepôt
         warehouse = self.request.query_params.get('warehouse')
         if warehouse:
             queryset = queryset.filter(warehouse_id=warehouse)
 
-        # Filtre par fournisseur
         supplier = self.request.query_params.get('supplier')
         if supplier:
             queryset = queryset.filter(purchase_order__supplier_id=supplier)
 
-        # Filtre par date
+        # ✅ Filtres INDEX-FRIENDLY
         date_from = self.request.query_params.get('date_from')
         if date_from:
-            queryset = queryset.filter(receipt_date__date__gte=date_from)
+            try:
+                date_start = dt.datetime.strptime(date_from, '%Y-%m-%d')
+                queryset = queryset.filter(receipt_date__gte=date_start)
+            except ValueError:
+                pass
 
         date_to = self.request.query_params.get('date_to')
         if date_to:
-            queryset = queryset.filter(receipt_date__date__lte=date_to)
+            try:
+                date_end = dt.datetime.strptime(date_to, '%Y-%m-%d')
+                date_end = date_end.replace(hour=23, minute=59, second=59)
+                queryset = queryset.filter(receipt_date__lte=date_end)
+            except ValueError:
+                pass
 
-        # Recherche
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -402,54 +535,53 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 Q(purchase_order__supplier__name__icontains=search)
             )
 
-        # Tri
         ordering = self.request.query_params.get('ordering', '-receipt_date')
         if ordering:
             queryset = queryset.order_by(ordering)
 
         return queryset
 
-    # ✅ CORRECTION CRITIQUE : Retirer created_by
-    # Le serializer ReceiptCreateSerializer le passe déjà lui-même
     def perform_create(self, serializer):
         serializer.save()
 
     @action(detail=False, methods=['get'])
     def available_for_invoice(self, request):
-        """Récupère les réceptions disponibles pour facturation"""
+        """✅ Réceptions disponibles pour facturation (paginé)."""
         purchase_order_id = request.query_params.get('purchase_order')
         supplier_id = request.query_params.get('supplier')
 
-        queryset = Receipt.objects.filter(
-            status='completed',
-            is_invoiced=False
-        ).select_related('purchase_order', 'purchase_order__supplier')
+        queryset = (
+            Receipt.objects
+            .filter(status='completed', is_invoiced=False)
+            .select_related('purchase_order', 'purchase_order__supplier')
+            .order_by('-receipt_date')
+        )
 
         if purchase_order_id:
             queryset = queryset.filter(purchase_order_id=purchase_order_id)
         if supplier_id:
             queryset = queryset.filter(purchase_order__supplier_id=supplier_id)
 
-        queryset = queryset.order_by('-receipt_date')
-        serializer = ReceiptChoiceSerializer(queryset, many=True)
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = ReceiptLiteSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = ReceiptLiteSerializer(queryset, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
-        """Annuler une réception"""
         receipt = self.get_object()
-
         if receipt.status != 'in_progress':
             return Response(
                 {"error": "Cette réception ne peut pas être annulée"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
         receipt.status = 'cancelled'
         receipt.save()
         receipt.generate_qr_code()
         receipt.save()
-
         return Response({
             'status': receipt.status,
             'message': 'Réception annulée avec succès'
@@ -457,20 +589,16 @@ class ReceiptViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
-        """Terminer une réception"""
         receipt = self.get_object()
-
         if receipt.status != 'in_progress':
             return Response(
                 {"error": "Seules les réceptions en cours peuvent être terminées"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
         receipt.status = 'completed'
         receipt.save()
         receipt.generate_qr_code()
         receipt.save()
-
         return Response({
             'status': receipt.status,
             'message': 'Réception terminée avec succès'
@@ -478,19 +606,15 @@ class ReceiptViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def generate_qr(self, request, pk=None):
-        """Générer le QR Code d'une réception"""
         receipt = self.get_object()
-
         if not receipt.qr_code:
             receipt.generate_qr_code()
             receipt.save()
-
         if receipt.qr_code:
             return Response({
                 'qr_code_url': request.build_absolute_uri(receipt.qr_code.url),
                 'qr_code_data': receipt.qr_code_data
             })
-
         return Response(
             {"error": "Impossible de générer le QR Code"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -498,26 +622,18 @@ class ReceiptViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def pdf_data(self, request, pk=None):
-        """
-        ✅ Endpoint dédié pour récupérer les données du PDF
-        Utile pour la génération côté client
-        """
         receipt = self.get_object()
-        serializer = ReceiptDetailSerializer(
-            receipt, context={'request': request}
-        )
+        serializer = ReceiptDetailSerializer(receipt, context={'request': request})
         return Response(serializer.data)
 
+
 # ============================================================
-# RETOUR FOURNISSEUR VIEWSET
+# RETOUR FOURNISSEUR VIEWSET - OPTIMISÉ
 # ============================================================
-
-# apps/achats_fournisseurs/views.py
-
-
 class PurchaseReturnViewSet(viewsets.ModelViewSet):
     queryset = PurchaseReturn.objects.all()
     permission_classes = [permissions.IsAuthenticated, IsGestionnaire]
+    pagination_class = PurchaseOrderPagination
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -530,9 +646,16 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset().select_related(
-            'purchase_order', 'purchase_order__supplier', 'receipt', 'created_by'
-        ).prefetch_related('lines', 'lines__product')
+        # ✅ CRITIQUE : select_related + prefetch_related
+        queryset = (
+            PurchaseReturn.objects
+            .select_related(
+                'purchase_order', 'purchase_order__supplier',
+                'receipt', 'created_by'
+            )
+            .prefetch_related('lines', 'lines__product')
+            .order_by('-return_date', '-id')
+        )
 
         purchase_order = self.request.query_params.get('purchase_order')
         if purchase_order:
@@ -560,11 +683,20 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
 
         date_from = self.request.query_params.get('date_from')
         if date_from:
-            queryset = queryset.filter(return_date__date__gte=date_from)
+            try:
+                date_start = dt.datetime.strptime(date_from, '%Y-%m-%d')
+                queryset = queryset.filter(return_date__gte=date_start)
+            except ValueError:
+                pass
 
         date_to = self.request.query_params.get('date_to')
         if date_to:
-            queryset = queryset.filter(return_date__date__lte=date_to)
+            try:
+                date_end = dt.datetime.strptime(date_to, '%Y-%m-%d')
+                date_end = date_end.replace(hour=23, minute=59, second=59)
+                queryset = queryset.filter(return_date__lte=date_end)
+            except ValueError:
+                pass
 
         ordering = self.request.query_params.get('ordering', '-return_date')
         if ordering:
@@ -572,13 +704,11 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
 
         return queryset
 
-    # ✅ CORRECTION : NE PAS passer created_by (déjà fait dans le serializer)
     def perform_create(self, serializer):
         serializer.save()
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
-        """Passer le retour en 'approved'"""
         retour = self.get_object()
         if retour.status != 'requested':
             return Response(
@@ -587,8 +717,7 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
             )
         retour.status = 'approved'
         if request.data.get('notes'):
-            retour.notes = (retour.notes + "\n" +
-                            request.data['notes']).strip()
+            retour.notes = (retour.notes + "\n" + request.data['notes']).strip()
         retour.save()
         retour.generate_qr_code()
         retour.save()
@@ -600,7 +729,6 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
-        """Refuser le retour"""
         retour = self.get_object()
         if retour.status not in ['requested', 'approved']:
             return Response(
@@ -609,8 +737,7 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
             )
         retour.status = 'rejected'
         if request.data.get('notes'):
-            retour.notes = (retour.notes + "\n" +
-                            request.data['notes']).strip()
+            retour.notes = (retour.notes + "\n" + request.data['notes']).strip()
         retour.save()
         retour.generate_qr_code()
         retour.save()
@@ -622,7 +749,6 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def ship(self, request, pk=None):
-        """Marquer le retour comme expédié"""
         retour = self.get_object()
         if retour.status != 'approved':
             return Response(
@@ -641,7 +767,6 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def refund(self, request, pk=None):
-        """Marquer le retour comme remboursé"""
         retour = self.get_object()
         if retour.status != 'shipped':
             return Response(
@@ -660,7 +785,6 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def replace(self, request, pk=None):
-        """Marquer le retour comme remplacé"""
         retour = self.get_object()
         if retour.status != 'shipped':
             return Response(
@@ -693,14 +817,14 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-# ============================================================
-# FACTURE FOURNISSEUR VIEWSET - CORRIGÉ
-# ============================================================
 
-
+# ============================================================
+# FACTURE FOURNISSEUR VIEWSET - OPTIMISÉ
+# ============================================================
 class SupplierInvoiceViewSet(viewsets.ModelViewSet):
     queryset = SupplierInvoice.objects.all()
     permission_classes = [permissions.IsAuthenticated, IsGestionnaire]
+    pagination_class = SupplierInvoicePagination
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -709,6 +833,8 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
             return SupplierInvoiceCreateSerializer
         elif self.action in ['update', 'partial_update']:
             return SupplierInvoiceUpdateSerializer
+        elif self.action == 'available_for_payment':
+            return SupplierInvoiceLiteSerializer
         return SupplierInvoiceDetailSerializer
 
     def get_serializer_context(self):
@@ -717,7 +843,18 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # ✅ CRITIQUE : select_related + annotation SQL
+        queryset = (
+            SupplierInvoice.objects
+            .select_related('supplier', 'purchase_order')
+            .annotate(
+                remaining_calc=ExpressionWrapper(
+                    F('total_amount') - F('amount_paid'),
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
+                )
+            )
+            .order_by('-invoice_date', '-id')
+        )
 
         purchase_order = self.request.query_params.get('purchase_order')
         if purchase_order:
@@ -739,12 +876,11 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
             else:
                 queryset = queryset.filter(paiement_status=paiement_status)
 
-        # ✅ Filtrer les factures disponibles pour paiement
-        available_for_payment = self.request.query_params.get(
-            'available_for_payment')
+        available_for_payment = self.request.query_params.get('available_for_payment')
         if available_for_payment == 'true':
             queryset = queryset.filter(is_fully_paid=False)
 
+        # ✅ Filtres INDEX-FRIENDLY
         date_from = self.request.query_params.get('date_from')
         if date_from:
             queryset = queryset.filter(invoice_date__gte=date_from)
@@ -760,6 +896,14 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
                 paiement_status__in=['unpaid', 'partial']
             )
 
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(invoice_number__icontains=search) |
+                Q(supplier__name__icontains=search) |
+                Q(purchase_order__po_number__icontains=search)
+            )
+
         ordering = self.request.query_params.get('ordering', '-invoice_date')
         if ordering:
             queryset = queryset.order_by(ordering)
@@ -771,7 +915,6 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def add_payment(self, request, pk=None):
-        """✅ Ajouter un paiement à une facture"""
         invoice = self.get_object()
 
         if invoice.is_fully_paid:
@@ -812,8 +955,8 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
                 return Response({
                     'status': 'success',
                     'message': '✅ Paiement enregistré avec succès',
-                    'payment': FournisseurPaiementSerializer(payment).data,
-                    'invoice': SupplierInvoiceDetailSerializer(invoice).data,
+                    'payment': FournisseurPaiementSerializer(payment, context={'request': request}).data,
+                    'invoice': SupplierInvoiceDetailSerializer(invoice, context={'request': request}).data,
                     'remaining_amount': invoice.remaining_amount,
                     'is_fully_paid': invoice.is_fully_paid
                 }, status=status.HTTP_201_CREATED)
@@ -824,18 +967,27 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def available_for_payment(self, request):
-        """✅ Récupère les factures disponibles pour paiement"""
+        """✅ Factures disponibles pour paiement (paginé)."""
         supplier_id = request.query_params.get('supplier')
-        queryset = SupplierInvoice.objects.filter(
-            is_fully_paid=False).order_by('due_date')
+        queryset = (
+            SupplierInvoice.objects
+            .filter(is_fully_paid=False)
+            .select_related('supplier', 'purchase_order')
+            .order_by('due_date')
+        )
         if supplier_id:
             queryset = queryset.filter(supplier_id=supplier_id)
-        serializer = SupplierInvoiceListSerializer(queryset, many=True)
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = SupplierInvoiceLiteSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = SupplierInvoiceLiteSerializer(queryset, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
     def payment_status(self, request, pk=None):
-        """✅ Obtenir le statut de paiement d'une facture"""
         invoice = self.get_object()
         return Response({
             'id': invoice.id,
@@ -851,12 +1003,12 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# PAIEMENT FOURNISSEUR VIEWSET - CORRIGÉ
+# PAIEMENT FOURNISSEUR VIEWSET - OPTIMISÉ
 # ============================================================
-
 class FournisseurPaiementViewSet(viewsets.ModelViewSet):
     queryset = FournisseurPaiement.objects.all()
     permission_classes = [permissions.IsAuthenticated, IsGestionnaire]
+    pagination_class = PaymentPagination
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -869,7 +1021,18 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # ✅ CRITIQUE : select_related
+        queryset = (
+            FournisseurPaiement.objects
+            .select_related(
+                'supplier_invoice',
+                'supplier_invoice__supplier',
+                'supplier_invoice__purchase_order',
+                'purchase_order',
+                'created_by',
+            )
+            .order_by('-payment_date', '-id')
+        )
 
         supplier_invoice = self.request.query_params.get('supplier_invoice')
         if supplier_invoice:
@@ -887,13 +1050,31 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
         if method:
             queryset = queryset.filter(method=method)
 
+        # ✅ Filtres INDEX-FRIENDLY
         date_from = self.request.query_params.get('date_from')
         if date_from:
-            queryset = queryset.filter(payment_date__date__gte=date_from)
+            try:
+                date_start = dt.datetime.strptime(date_from, '%Y-%m-%d')
+                queryset = queryset.filter(payment_date__gte=date_start)
+            except ValueError:
+                pass
 
         date_to = self.request.query_params.get('date_to')
         if date_to:
-            queryset = queryset.filter(payment_date__date__lte=date_to)
+            try:
+                date_end = dt.datetime.strptime(date_to, '%Y-%m-%d')
+                date_end = date_end.replace(hour=23, minute=59, second=59)
+                queryset = queryset.filter(payment_date__lte=date_end)
+            except ValueError:
+                pass
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(reference__icontains=search) |
+                Q(supplier_invoice__invoice_number__icontains=search) |
+                Q(supplier_invoice__supplier__name__icontains=search)
+            )
 
         ordering = self.request.query_params.get('ordering', '-payment_date')
         if ordering:
@@ -901,7 +1082,6 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
 
         return queryset
 
-    # ✅ CORRECTION : Ne pas passer created_by dans save()
     def perform_create(self, serializer):
         serializer.save()
 
@@ -927,10 +1107,11 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
             try:
                 from tresorerie.models import MouvementTresorerie
                 mouvement = MouvementTresorerie.objects.get(
-                    id=paiement.mouvement_tresorerie_id)
+                    id=paiement.mouvement_tresorerie_id
+                )
                 mouvement.status = 'cancelled'
                 mouvement.save()
-            except:
+            except Exception:
                 pass
 
         paiement.status = 'cancelled'
@@ -962,13 +1143,8 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# DASHBOARD STATS VIEWSET
+# DASHBOARD STATS VIEWSET - OPTIMISÉ
 # ============================================================
-
-# ============================================================
-# DASHBOARD STATS VIEWSET
-# ============================================================
-
 class AchatsDashboardStatsViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -977,7 +1153,11 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
         today = date.today()
 
         # ========== COMMANDES ==========
-        total_orders = PurchaseOrder.objects.count()
+        orders_agg = PurchaseOrder.objects.aggregate(
+            total=Count('id'),
+            total_amount=Sum('total'),
+        )
+        total_orders = orders_agg['total'] or 0
         pending_orders = PurchaseOrder.objects.filter(
             status__in=['draft', 'sent', 'confirmed']
         ).count()
@@ -985,11 +1165,7 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
             order_date__month=today.month,
             order_date__year=today.year
         ).count()
-
-        total_amount = PurchaseOrder.objects.aggregate(
-            total=Sum('total')
-        )['total'] or 0
-
+        total_amount = orders_agg['total_amount'] or 0
         amount_this_month = PurchaseOrder.objects.filter(
             order_date__month=today.month,
             order_date__year=today.year
@@ -1003,14 +1179,18 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
         non_invoiced_receipts = Receipt.objects.filter(
             is_invoiced=False, status='completed'
         ).count()
-
         received_amount = PurchaseOrder.objects.aggregate(
             total=Sum('total_received_amount')
         )['total'] or 0
         remaining_to_receive = total_amount - received_amount
 
         # ========== FACTURES ==========
-        total_invoices = SupplierInvoice.objects.count()
+        invoices_agg = SupplierInvoice.objects.aggregate(
+            total=Count('id'),
+            total_invoiced=Sum('total_amount'),
+            total_paid=Sum('amount_paid'),
+        )
+        total_invoices = invoices_agg['total'] or 0
         unpaid_invoices = SupplierInvoice.objects.filter(
             paiement_status__in=['unpaid', 'partial', 'overdue']
         ).count()
@@ -1018,39 +1198,30 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
             due_date__lt=today,
             paiement_status__in=['unpaid', 'partial']
         ).count()
-
-        total_invoiced = SupplierInvoice.objects.aggregate(
-            total=Sum('total_amount')
-        )['total'] or 0
-        total_paid = SupplierInvoice.objects.aggregate(
-            total=Sum('amount_paid')
-        )['total'] or 0
+        total_invoiced = invoices_agg['total_invoiced'] or 0
+        total_paid = invoices_agg['total_paid'] or 0
         total_remaining_to_pay = total_invoiced - total_paid
 
         # ========== TOP FOURNISSEURS ==========
-        # ✅ CORRECTION : Renommer les annotations pour éviter le conflit avec le champ `total_orders`
         top_suppliers = Supplier.objects.annotate(
-            # ← renommé (était total_orders)
             orders_count=Count('purchase_orders'),
-            # ← renommé (était total_amount)
             orders_total_amount=Sum('purchase_orders__total')
         ).filter(orders_count__gt=0).order_by('-orders_total_amount')[:5]
 
-        top_suppliers_data = []
-        for supplier in top_suppliers:
-            top_suppliers_data.append({
-                'id': supplier.id,
-                'name': supplier.name,
-                'total_orders': supplier.orders_count,
-                'total_amount': supplier.orders_total_amount or 0
-            })
+        top_suppliers_data = [{
+            'id': s.id,
+            'name': s.name,
+            'total_orders': s.orders_count,
+            'total_amount': s.orders_total_amount or 0
+        } for s in top_suppliers]
 
         # ========== COMMANDES PAR STATUT ==========
-        orders_by_status = {}
-        for status_code, status_label in PurchaseOrder.STATUS_CHOICES:
-            count = PurchaseOrder.objects.filter(status=status_code).count()
-            if count > 0:
-                orders_by_status[status_code] = count
+        orders_by_status = dict(
+            PurchaseOrder.objects
+            .values_list('status')
+            .annotate(count=Count('id'))
+            .values_list('status', 'count')
+        )
 
         # ========== ALERTES ==========
         alerts = {
