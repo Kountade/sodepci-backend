@@ -1,11 +1,11 @@
 # apps/achats_fournisseurs/serializers.py
 # ============================================================
-# SERIALIZERS COMPLET OPTIMISÉ
+# SERIALIZERS COMPLET OPTIMISÉ - VERSION MISE À JOUR
 # ============================================================
 
 from rest_framework import serializers
 from django.db import transaction
-from django.db.models import Sum, F
+from django.db.models import Sum, F, Case, When, Value, DecimalField, ExpressionWrapper
 from datetime import date
 from decimal import Decimal
 
@@ -18,7 +18,58 @@ from produits_stocks.models import Product, Lot, Stock, StockMovement
 
 
 # ============================================================
-# ✅ SERIALIZERS LITE (pour éviter N+1 sur les listes déroulantes)
+# ✅ FONCTION UTILITAIRE : Calcul du % de réception
+# ============================================================
+def calculate_receipt_progress(obj):
+    """
+    ✅ Calcule le % de réception d'une commande.
+    - Basé sur le montant reçu / total (le plus fiable)
+    - Fallback sur les quantités si total = 0
+    """
+    try:
+        # Option 1 : Montant
+        if obj.total and float(obj.total) > 0:
+            received = float(obj.total_received_amount or 0)
+            total = float(obj.total)
+            return round((received / total) * 100, 2)
+
+        # Option 2 : Quantités (fallback)
+        lines = obj.lines.all()
+        total_ordered = sum(line.quantity for line in lines)
+        total_received = sum(line.quantity_received for line in lines)
+        if total_ordered > 0:
+            return round((total_received / total_ordered) * 100, 2)
+    except Exception:
+        pass
+    return 0
+
+
+def calculate_invoice_progress(obj):
+    """✅ Calcule le % de facturation."""
+    try:
+        if obj.total and float(obj.total) > 0:
+            invoiced = float(obj.total_invoiced_amount or 0)
+            total = float(obj.total)
+            return round((invoiced / total) * 100, 2)
+    except Exception:
+        pass
+    return 0
+
+
+def calculate_payment_progress(obj):
+    """✅ Calcule le % de paiement."""
+    try:
+        if obj.total_invoiced_amount and float(obj.total_invoiced_amount) > 0:
+            paid = float(obj.total_paid_amount or 0)
+            invoiced = float(obj.total_invoiced_amount)
+            return round((paid / invoiced) * 100, 2)
+    except Exception:
+        pass
+    return 0
+
+
+# ============================================================
+# ✅ SERIALIZERS LITE (pour éviter N+1)
 # ============================================================
 
 class SupplierLiteSerializer(serializers.ModelSerializer):
@@ -37,18 +88,47 @@ class SupplierLiteSerializer(serializers.ModelSerializer):
 
 
 class PurchaseOrderLiteSerializer(serializers.ModelSerializer):
-    """Serializer léger pour listes déroulantes (réceptions, factures)."""
+    """
+    ✅ Serializer léger pour listes déroulantes (réceptions, factures).
+    ⚠️ CORRIGÉ : Ajoute le % de réception calculé AVANT sélection.
+    """
     supplier_name = serializers.CharField(
         source='supplier.name', read_only=True)
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
 
+    # ✅ NOUVEAU : Pourcentage de réception calculé
+    receipt_progress = serializers.SerializerMethodField()
+    # ✅ NOUVEAU : Autres progressions (utiles pour d'autres écrans)
+    invoice_progress = serializers.SerializerMethodField()
+    payment_progress = serializers.SerializerMethodField()
+    # ✅ NOUVEAU : Montants détaillés
+    total_received_amount = serializers.ReadOnlyField()
+    total_invoiced_amount = serializers.ReadOnlyField()
+    total_paid_amount = serializers.ReadOnlyField()
+
     class Meta:
         model = PurchaseOrder
-        fields = ['id', 'po_number', 'supplier_id', 'supplier_name',
-                  'order_date', 'total', 'status', 'status_display',
-                  'is_fully_received', 'is_fully_invoiced', 'is_fully_paid']
+        fields = [
+            'id', 'po_number', 'supplier_id', 'supplier_name',
+            'order_date', 'expected_delivery_date',
+            'total', 'status', 'status_display',
+            'is_fully_received', 'is_fully_invoiced', 'is_fully_paid',
+            # ✅ Nouveaux champs
+            'receipt_progress', 'invoice_progress', 'payment_progress',
+            'total_received_amount', 'total_invoiced_amount', 'total_paid_amount',
+        ]
         read_only_fields = ['id', 'order_date', 'po_number']
+
+    def get_receipt_progress(self, obj):
+        """✅ Calcule le % de réception - disponible AVANT sélection."""
+        return calculate_receipt_progress(obj)
+
+    def get_invoice_progress(self, obj):
+        return calculate_invoice_progress(obj)
+
+    def get_payment_progress(self, obj):
+        return calculate_payment_progress(obj)
 
 
 class ReceiptLiteSerializer(serializers.ModelSerializer):
@@ -252,26 +332,36 @@ class PurchaseOrderListSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
     has_qr_code = serializers.SerializerMethodField()
+    # ✅ CORRIGÉ : utiliser les mêmes utilitaires que Lite
     receipt_progress = serializers.SerializerMethodField()
     payment_progress = serializers.SerializerMethodField()
+    invoice_progress = serializers.SerializerMethodField()
+    # ✅ NOUVEAU : Montants
+    total_received_amount = serializers.ReadOnlyField()
+    total_invoiced_amount = serializers.ReadOnlyField()
+    total_paid_amount = serializers.ReadOnlyField()
 
     class Meta:
         model = PurchaseOrder
         fields = ['id', 'po_number', 'supplier', 'supplier_name', 'supplier_code',
                   'order_date', 'expected_delivery_date', 'actual_delivery_date',
                   'total', 'status', 'status_display', 'created_by', 'has_qr_code',
-                  'receipt_progress', 'payment_progress', 'is_fully_received',
-                  'is_fully_invoiced', 'is_fully_paid']
+                  'receipt_progress', 'invoice_progress', 'payment_progress',
+                  'is_fully_received', 'is_fully_invoiced', 'is_fully_paid',
+                  'total_received_amount', 'total_invoiced_amount', 'total_paid_amount']
         read_only_fields = ['id', 'order_date', 'po_number']
 
     def get_has_qr_code(self, obj):
         return bool(obj.qr_code)
 
     def get_receipt_progress(self, obj):
-        return obj.receipt_progress
+        return calculate_receipt_progress(obj)
+
+    def get_invoice_progress(self, obj):
+        return calculate_invoice_progress(obj)
 
     def get_payment_progress(self, obj):
-        return obj.payment_progress
+        return calculate_payment_progress(obj)
 
 
 class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
@@ -283,6 +373,8 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
         source='supplier.address', read_only=True)
     supplier_phone = serializers.CharField(
         source='supplier.phone', read_only=True)
+    supplier_email = serializers.CharField(
+        source='supplier.email', read_only=True)
     lines = PurchaseOrderLineSerializer(many=True, read_only=True)
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
@@ -301,8 +393,8 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseOrder
         fields = ['id', 'po_number', 'supplier_reference', 'supplier', 'supplier_name',
-                  'supplier_code', 'supplier_address', 'supplier_phone', 'order_date',
-                  'expected_delivery_date', 'actual_delivery_date', 'subtotal',
+                  'supplier_code', 'supplier_address', 'supplier_phone', 'supplier_email',
+                  'order_date', 'expected_delivery_date', 'actual_delivery_date', 'subtotal',
                   'discount_type', 'discount_value', 'discount_amount', 'tax_rate',
                   'tax_amount', 'shipping_cost', 'total', 'status', 'status_display',
                   'notes', 'internal_notes', 'shipping_address', 'tracking_number',
@@ -336,30 +428,22 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
         return None
 
     def get_receipt_progress(self, obj):
-        if obj.total == 0:
-            return 0
-        return (obj.total_received_amount / obj.total) * 100
+        return calculate_receipt_progress(obj)
 
     def get_invoice_progress(self, obj):
-        if obj.total == 0:
-            return 0
-        total_invoiced = obj.invoices.aggregate(
-            total=Sum('total_amount'))['total'] or 0
-        return (total_invoiced / obj.total) * 100
+        return calculate_invoice_progress(obj)
 
     def get_payment_progress(self, obj):
-        if obj.total_invoiced_amount == 0:
-            return 0
-        return (obj.total_paid_amount / obj.total_invoiced_amount) * 100
+        return calculate_payment_progress(obj)
 
     def get_remaining_to_receive(self, obj):
-        return obj.total - obj.total_received_amount
+        return float(obj.total) - float(obj.total_received_amount or 0)
 
     def get_remaining_to_invoice(self, obj):
-        return obj.total - obj.total_invoiced_amount
+        return float(obj.total) - float(obj.total_invoiced_amount or 0)
 
     def get_remaining_to_pay(self, obj):
-        return obj.total_invoiced_amount - obj.total_paid_amount
+        return float(obj.total_invoiced_amount or 0) - float(obj.total_paid_amount or 0)
 
 
 class PurchaseOrderCreateSerializer(serializers.ModelSerializer):

@@ -1,6 +1,6 @@
 # apps/achats_fournisseurs/views.py
 # ============================================================
-# VIEWS COMPLET OPTIMISÉ
+# VIEWS COMPLET OPTIMISÉ - VERSION FINALE CORRIGÉE
 # ============================================================
 
 from rest_framework import viewsets, status, permissions
@@ -39,7 +39,7 @@ from users.permissions import IsAdmin, IsGestionnaire, IsMagasinier
 
 
 # ============================================================
-# FOURNISSEUR VIEWSET - OPTIMISÉ
+# FOURNISSEUR VIEWSET
 # ============================================================
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.all()
@@ -56,13 +56,13 @@ class SupplierViewSet(viewsets.ModelViewSet):
         return SupplierDetailSerializer
 
     def get_queryset(self):
-        # ✅ Annotation des dettes en SQL (évite 2 requêtes par fournisseur)
         queryset = (
             Supplier.objects
             .annotate(
                 total_debt_annotated=Sum(
                     F('invoices__total_amount') - F('invoices__amount_paid'),
-                    filter=Q(invoices__paiement_status__in=['unpaid', 'partial', 'overdue'])
+                    filter=Q(invoices__paiement_status__in=[
+                             'unpaid', 'partial', 'overdue'])
                 ),
                 overdue_debt_annotated=Sum(
                     F('invoices__total_amount') - F('invoices__amount_paid'),
@@ -110,7 +110,6 @@ class SupplierViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='for-select')
     def for_select(self, request):
-        """✅ Liste ultra-légère pour les <select>."""
         queryset = Supplier.objects.filter(is_active=True).only(
             'id', 'code', 'name', 'phone', 'email', 'is_active'
         ).order_by('name')
@@ -146,8 +145,8 @@ class SupplierViewSet(viewsets.ModelViewSet):
         supplier = self.get_object()
         orders = supplier.purchase_orders.all()
         aggregates = orders.aggregate(
-            total_orders=Count('id'),
-            total_amount=Sum('total'),
+            orders_count=Count('id'),
+            orders_amount=Sum('total'),
             received_amount=Sum('total_received_amount'),
             invoiced_amount=Sum('total_invoiced_amount'),
             paid_amount=Sum('total_paid_amount'),
@@ -158,8 +157,8 @@ class SupplierViewSet(viewsets.ModelViewSet):
             .values_list('status', 'count')
         )
         return Response({
-            'total_orders': aggregates['total_orders'] or 0,
-            'total_amount': aggregates['total_amount'] or 0,
+            'total_orders': aggregates['orders_count'] or 0,
+            'total_amount': aggregates['orders_amount'] or 0,
             'received_amount': aggregates['received_amount'] or 0,
             'invoiced_amount': aggregates['invoiced_amount'] or 0,
             'paid_amount': aggregates['paid_amount'] or 0,
@@ -185,7 +184,8 @@ class SupplierViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def products(self, request, pk=None):
         supplier = self.get_object()
-        products = supplier.products.filter(is_active=True).select_related('product')
+        products = supplier.products.filter(
+            is_active=True).select_related('product')
         serializer = SupplierProductSerializer(products, many=True)
         return Response(serializer.data)
 
@@ -213,7 +213,7 @@ class SupplierViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# BON DE COMMANDE VIEWSET - OPTIMISÉ
+# BON DE COMMANDE VIEWSET
 # ============================================================
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all()
@@ -237,7 +237,6 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        # ✅ CRITIQUE : select_related + prefetch_related
         queryset = (
             PurchaseOrder.objects
             .select_related('supplier', 'created_by', 'approved_by')
@@ -266,17 +265,18 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
         is_fully_received = self.request.query_params.get('is_fully_received')
         if is_fully_received is not None:
-            queryset = queryset.filter(is_fully_received=(is_fully_received == 'true'))
+            queryset = queryset.filter(
+                is_fully_received=(is_fully_received == 'true'))
 
         is_fully_invoiced = self.request.query_params.get('is_fully_invoiced')
         if is_fully_invoiced is not None:
-            queryset = queryset.filter(is_fully_invoiced=(is_fully_invoiced == 'true'))
+            queryset = queryset.filter(
+                is_fully_invoiced=(is_fully_invoiced == 'true'))
 
         is_fully_paid = self.request.query_params.get('is_fully_paid')
         if is_fully_paid is not None:
             queryset = queryset.filter(is_fully_paid=(is_fully_paid == 'true'))
 
-        # ✅ Filtres INDEX-FRIENDLY (pas de __date)
         date_from = self.request.query_params.get('date_from')
         if date_from:
             try:
@@ -305,7 +305,6 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='for-select')
     def for_select(self, request):
-        """✅ Liste légère pour <select>."""
         status_filter = request.query_params.get('status', 'confirmed,partial')
         statuses = [s.strip() for s in status_filter.split(',')]
         queryset = (
@@ -322,7 +321,6 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def available_for_receipt(self, request):
-        """✅ Commandes disponibles pour réception (paginé)."""
         queryset = (
             PurchaseOrder.objects
             .filter(status__in=['confirmed', 'partial'], is_fully_received=False)
@@ -406,8 +404,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def receipts(self, request, pk=None):
         purchase_order = self.get_object()
-        receipts = purchase_order.receipts.select_related('warehouse', 'created_by')
-        serializer = ReceiptListSerializer(receipts, many=True, context={'request': request})
+        receipts = purchase_order.receipts.select_related(
+            'warehouse', 'created_by')
+        serializer = ReceiptListSerializer(
+            receipts, many=True, context={'request': request})
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
@@ -450,7 +450,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# RÉCEPTION VIEWSET - OPTIMISÉ
+# RÉCEPTION VIEWSET
 # ============================================================
 class ReceiptViewSet(viewsets.ModelViewSet):
     queryset = Receipt.objects.all()
@@ -472,7 +472,6 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        # ✅ CRITIQUE : select_related + prefetch_related
         queryset = (
             Receipt.objects
             .select_related(
@@ -509,7 +508,6 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         if supplier:
             queryset = queryset.filter(purchase_order__supplier_id=supplier)
 
-        # ✅ Filtres INDEX-FRIENDLY
         date_from = self.request.query_params.get('date_from')
         if date_from:
             try:
@@ -546,7 +544,6 @@ class ReceiptViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def available_for_invoice(self, request):
-        """✅ Réceptions disponibles pour facturation (paginé)."""
         purchase_order_id = request.query_params.get('purchase_order')
         supplier_id = request.query_params.get('supplier')
 
@@ -623,12 +620,13 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def pdf_data(self, request, pk=None):
         receipt = self.get_object()
-        serializer = ReceiptDetailSerializer(receipt, context={'request': request})
+        serializer = ReceiptDetailSerializer(
+            receipt, context={'request': request})
         return Response(serializer.data)
 
 
 # ============================================================
-# RETOUR FOURNISSEUR VIEWSET - OPTIMISÉ
+# RETOUR FOURNISSEUR VIEWSET
 # ============================================================
 class PurchaseReturnViewSet(viewsets.ModelViewSet):
     queryset = PurchaseReturn.objects.all()
@@ -646,7 +644,6 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        # ✅ CRITIQUE : select_related + prefetch_related
         queryset = (
             PurchaseReturn.objects
             .select_related(
@@ -717,7 +714,8 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
             )
         retour.status = 'approved'
         if request.data.get('notes'):
-            retour.notes = (retour.notes + "\n" + request.data['notes']).strip()
+            retour.notes = (retour.notes + "\n" +
+                            request.data['notes']).strip()
         retour.save()
         retour.generate_qr_code()
         retour.save()
@@ -737,7 +735,8 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
             )
         retour.status = 'rejected'
         if request.data.get('notes'):
-            retour.notes = (retour.notes + "\n" + request.data['notes']).strip()
+            retour.notes = (retour.notes + "\n" +
+                            request.data['notes']).strip()
         retour.save()
         retour.generate_qr_code()
         retour.save()
@@ -819,7 +818,7 @@ class PurchaseReturnViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# FACTURE FOURNISSEUR VIEWSET - OPTIMISÉ
+# FACTURE FOURNISSEUR VIEWSET
 # ============================================================
 class SupplierInvoiceViewSet(viewsets.ModelViewSet):
     queryset = SupplierInvoice.objects.all()
@@ -843,7 +842,6 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        # ✅ CRITIQUE : select_related + annotation SQL
         queryset = (
             SupplierInvoice.objects
             .select_related('supplier', 'purchase_order')
@@ -876,11 +874,11 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
             else:
                 queryset = queryset.filter(paiement_status=paiement_status)
 
-        available_for_payment = self.request.query_params.get('available_for_payment')
+        available_for_payment = self.request.query_params.get(
+            'available_for_payment')
         if available_for_payment == 'true':
             queryset = queryset.filter(is_fully_paid=False)
 
-        # ✅ Filtres INDEX-FRIENDLY
         date_from = self.request.query_params.get('date_from')
         if date_from:
             queryset = queryset.filter(invoice_date__gte=date_from)
@@ -967,7 +965,6 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def available_for_payment(self, request):
-        """✅ Factures disponibles pour paiement (paginé)."""
         supplier_id = request.query_params.get('supplier')
         queryset = (
             SupplierInvoice.objects
@@ -1003,7 +1000,7 @@ class SupplierInvoiceViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# PAIEMENT FOURNISSEUR VIEWSET - OPTIMISÉ
+# PAIEMENT FOURNISSEUR VIEWSET
 # ============================================================
 class FournisseurPaiementViewSet(viewsets.ModelViewSet):
     queryset = FournisseurPaiement.objects.all()
@@ -1021,7 +1018,6 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
-        # ✅ CRITIQUE : select_related
         queryset = (
             FournisseurPaiement.objects
             .select_related(
@@ -1050,7 +1046,6 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
         if method:
             queryset = queryset.filter(method=method)
 
-        # ✅ Filtres INDEX-FRIENDLY
         date_from = self.request.query_params.get('date_from')
         if date_from:
             try:
@@ -1143,79 +1138,44 @@ class FournisseurPaiementViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# DASHBOARD STATS VIEWSET - OPTIMISÉ
+# DASHBOARD STATS VIEWSET - ✅ CORRIGÉ ET UNIQUE
 # ============================================================
 class AchatsDashboardStatsViewSet(viewsets.ViewSet):
+    """
+    ✅ Dashboard stats - VERSION UNIQUE CORRIGÉE
+    Toutes les agrégations utilisent des alias UNIQUES pour éviter
+    l'erreur "Cannot compute Sum('total'): 'total' is an aggregate"
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     @action(detail=False, methods=['get'])
     def statistics(self, request):
         today = date.today()
 
-        # ========== COMMANDES ==========
+        # ============================================================
+        # COMMANDES - alias uniques
+        # ============================================================
         orders_agg = PurchaseOrder.objects.aggregate(
-            total=Count('id'),
-            total_amount=Sum('total'),
+            orders_count=Count('id'),
+            orders_total=Sum('total'),
         )
-        total_orders = orders_agg['total'] or 0
+        total_orders = orders_agg['orders_count'] or 0
+        total_amount = orders_agg['orders_total'] or 0
+
         pending_orders = PurchaseOrder.objects.filter(
             status__in=['draft', 'sent', 'confirmed']
         ).count()
+
         orders_this_month = PurchaseOrder.objects.filter(
             order_date__month=today.month,
             order_date__year=today.year
         ).count()
-        total_amount = orders_agg['total_amount'] or 0
+
         amount_this_month = PurchaseOrder.objects.filter(
             order_date__month=today.month,
             order_date__year=today.year
-        ).aggregate(total=Sum('total'))['total'] or 0
+        ).aggregate(monthly_total=Sum('total'))['monthly_total'] or 0
 
-        # ========== RÉCEPTIONS ==========
-        total_received = Receipt.objects.filter(status='completed').count()
-        pending_receipts = Receipt.objects.filter(
-            status__in=['pending', 'in_progress']
-        ).count()
-        non_invoiced_receipts = Receipt.objects.filter(
-            is_invoiced=False, status='completed'
-        ).count()
-        received_amount = PurchaseOrder.objects.aggregate(
-            total=Sum('total_received_amount')
-        )['total'] or 0
-        remaining_to_receive = total_amount - received_amount
-
-        # ========== FACTURES ==========
-        invoices_agg = SupplierInvoice.objects.aggregate(
-            total=Count('id'),
-            total_invoiced=Sum('total_amount'),
-            total_paid=Sum('amount_paid'),
-        )
-        total_invoices = invoices_agg['total'] or 0
-        unpaid_invoices = SupplierInvoice.objects.filter(
-            paiement_status__in=['unpaid', 'partial', 'overdue']
-        ).count()
-        overdue_invoices = SupplierInvoice.objects.filter(
-            due_date__lt=today,
-            paiement_status__in=['unpaid', 'partial']
-        ).count()
-        total_invoiced = invoices_agg['total_invoiced'] or 0
-        total_paid = invoices_agg['total_paid'] or 0
-        total_remaining_to_pay = total_invoiced - total_paid
-
-        # ========== TOP FOURNISSEURS ==========
-        top_suppliers = Supplier.objects.annotate(
-            orders_count=Count('purchase_orders'),
-            orders_total_amount=Sum('purchase_orders__total')
-        ).filter(orders_count__gt=0).order_by('-orders_total_amount')[:5]
-
-        top_suppliers_data = [{
-            'id': s.id,
-            'name': s.name,
-            'total_orders': s.orders_count,
-            'total_amount': s.orders_total_amount or 0
-        } for s in top_suppliers]
-
-        # ========== COMMANDES PAR STATUT ==========
         orders_by_status = dict(
             PurchaseOrder.objects
             .values_list('status')
@@ -1223,7 +1183,71 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
             .values_list('status', 'count')
         )
 
-        # ========== ALERTES ==========
+        # ============================================================
+        # RÉCEPTIONS - alias uniques
+        # ============================================================
+        total_received = Receipt.objects.filter(status='completed').count()
+        pending_receipts = Receipt.objects.filter(
+            status__in=['pending', 'in_progress']
+        ).count()
+        non_invoiced_receipts = Receipt.objects.filter(
+            is_invoiced=False, status='completed'
+        ).count()
+
+        received_amount = PurchaseOrder.objects.aggregate(
+            received=Sum('total_received_amount')
+        )['received'] or 0
+
+        remaining_to_receive = float(total_amount) - float(received_amount)
+
+        # ============================================================
+        # FACTURES - alias uniques
+        # ============================================================
+        invoices_agg = SupplierInvoice.objects.aggregate(
+            invoices_count=Count('id'),
+            invoices_total=Sum('total_amount'),
+            invoices_paid=Sum('amount_paid'),
+        )
+        total_invoices = invoices_agg['invoices_count'] or 0
+        total_invoiced = invoices_agg['invoices_total'] or 0
+        total_paid = invoices_agg['invoices_paid'] or 0
+        total_remaining_to_pay = float(total_invoiced) - float(total_paid)
+
+        unpaid_invoices = SupplierInvoice.objects.filter(
+            paiement_status__in=['unpaid', 'partial', 'overdue']
+        ).count()
+
+        overdue_invoices = SupplierInvoice.objects.filter(
+            due_date__lt=today,
+            paiement_status__in=['unpaid', 'partial']
+        ).count()
+
+        # ============================================================
+        # TOP FOURNISSEURS - alias UNIQUES (important !)
+        # ============================================================
+        top_suppliers = (
+            Supplier.objects
+            .annotate(
+                suppliers_orders_count=Count('purchase_orders'),
+                suppliers_orders_total=Sum('purchase_orders__total'),
+            )
+            .filter(suppliers_orders_count__gt=0)
+            .order_by('-suppliers_orders_total')[:5]
+        )
+
+        top_suppliers_data = [
+            {
+                'id': s.id,
+                'name': s.name,
+                'total_orders': s.suppliers_orders_count,
+                'total_amount': float(s.suppliers_orders_total or 0),
+            }
+            for s in top_suppliers
+        ]
+
+        # ============================================================
+        # ALERTES
+        # ============================================================
         alerts = {
             'overdue_invoices': overdue_invoices,
             'pending_receipts': pending_receipts,
@@ -1231,29 +1255,31 @@ class AchatsDashboardStatsViewSet(viewsets.ViewSet):
             'non_invoiced_receipts': non_invoiced_receipts,
         }
 
-        # ========== RÉPONSE ==========
+        # ============================================================
+        # RÉPONSE
+        # ============================================================
         return Response({
             'orders': {
                 'total': total_orders,
                 'pending': pending_orders,
                 'this_month': orders_this_month,
-                'total_amount': total_amount,
-                'amount_this_month': amount_this_month,
+                'total_amount': float(total_amount),
+                'amount_this_month': float(amount_this_month),
                 'by_status': orders_by_status,
             },
             'receipts': {
                 'total': total_received,
                 'pending': pending_receipts,
                 'non_invoiced': non_invoiced_receipts,
-                'received_amount': received_amount,
+                'received_amount': float(received_amount),
                 'remaining_to_receive': remaining_to_receive,
             },
             'invoices': {
                 'total': total_invoices,
                 'unpaid': unpaid_invoices,
                 'overdue': overdue_invoices,
-                'total_invoiced': total_invoiced,
-                'total_paid': total_paid,
+                'total_invoiced': float(total_invoiced),
+                'total_paid': float(total_paid),
                 'total_remaining_to_pay': total_remaining_to_pay,
             },
             'suppliers': {
